@@ -19,12 +19,30 @@ use crate::util::{
 };
 use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
-use std::cmp::Ordering;
 use Expr::*;
 use InferFlag::*;
 
 pub(crate) type EnvId = u32;
 pub(crate) const ENV_NIL: EnvId = 0;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NatOp {
+    Succ,
+    Add,
+    Sub,
+    Mul,
+    Pow,
+    Gcd,
+    Mod,
+    Div,
+    Beq,
+    Ble,
+    LAnd,
+    LOr,
+    XOr,
+    Shl,
+    Shr,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Entry<'t> {
@@ -39,11 +57,6 @@ pub(crate) struct EnvNode<'t> {
     len: u32,
     /// Myers jump pointer for O(log n) indexing
     jump: EnvId,
-    /// Whether this chain is a `restrict_env` output: every `Val` entry
-    /// carries a canonically restricted environment, and the chain's length
-    /// equals the loose-bvar range it was restricted to. For such a chain,
-    /// `restrict_env(len, env) == env`.
-    canonical: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -64,9 +77,6 @@ pub(crate) struct SClo<'t> {
     pub spine: Vec<Clo<'t>>,
 }
 
-/// spined-closure cache key
-type SKey<'t> = (Clo<'t>, Box<[Clo<'t>]>);
-
 fn clo_le(a: &Clo, b: &Clo) -> bool { a.okey() <= b.okey() }
 
 /// Injective packing of an environment-extension request into two words
@@ -79,23 +89,6 @@ fn pack_entry_key(env: EnvId, entry: Entry) -> (u64, u64) {
     }
 }
 
-fn skey_le(a: &SKey, b: &SKey) -> bool {
-    match a.0.okey().cmp(&b.0.okey()) {
-        Ordering::Less => return true,
-        Ordering::Greater => return false,
-        Ordering::Equal => {}
-    }
-    let (x, y) = (&a.1, &b.1);
-    for (c, d) in x.iter().zip(y.iter()) {
-        match c.okey().cmp(&d.okey()) {
-            Ordering::Less => return true,
-            Ordering::Greater => return false,
-            Ordering::Equal => {}
-        }
-    }
-    x.len() <= y.len()
-}
-
 pub(crate) struct RapierSt<'t> {
     envs: Vec<EnvNode<'t>>,
     /// keyed by `pack_entry_key(parent, entry)`
@@ -103,16 +96,10 @@ pub(crate) struct RapierSt<'t> {
 
     infer_cache_check: FxHashMap<Clo<'t>, ExprPtr<'t>>,
     infer_cache_only: FxHashMap<Clo<'t>, ExprPtr<'t>>,
-    infer_s_cache: FxHashMap<SKey<'t>, ExprPtr<'t>>,
     whnf_cache: FxHashMap<Clo<'t>, SClo<'t>>,
     eq_pos: FxHashSet<(Clo<'t>, Clo<'t>)>,
     eq_neg: FxHashSet<(Clo<'t>, Clo<'t>)>,
-    eq_s_pos: FxHashSet<(SKey<'t>, SKey<'t>)>,
-    eq_s_neg: FxHashSet<(SKey<'t>, SKey<'t>)>,
-    reify_cache: FxHashMap<Clo<'t>, ExprPtr<'t>>,
     reify_go_cache: FxHashMap<(ExprPtr<'t>, EnvId, u16), ExprPtr<'t>>,
-    chase_cache: FxHashMap<(ExprPtr<'t>, EnvId), (ExprPtr<'t>, EnvId)>,
-    restr_cache: FxHashMap<(u16, EnvId), EnvId>,
     abs_cache: FxHashMap<(ExprPtr<'t>, ExprPtr<'t>, u16), ExprPtr<'t>>,
     /// keyed by the packed `(ae|aenv, be|benv, aoff|boff)` triple
     eq_mod_cache: FxHashMap<(u64, u64, u32), bool>,
@@ -123,15 +110,12 @@ pub(crate) struct RapierSt<'t> {
     // the time of entry, so no per-declaration state can leak through them.
     // Never populated while a temporary environment extension (nested
     // inductive checking) is active.
-    g_whnf: FxHashMap<ExprPtr<'t>, (ExprPtr<'t>, Box<[ExprPtr<'t>]>)>,
-    g_infer: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
     /// const expr -> its level-instantiated definition value
     g_unfold: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
     /// const expr -> its level-instantiated type
     g_inst_ty: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
     g_eq_pos: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
     g_eq_neg: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
-    lvl_eq_cache: FxHashMap<(LevelPtr<'t>, LevelPtr<'t>), bool>,
 
     /// diagnostic counters: [infer, whnf_core, whnf, def_eq, whnf_hit,
     /// whnf_miss, g_whnf_hit, g_whnf_miss, unfold_hit, unfold_miss,
@@ -142,30 +126,21 @@ pub(crate) struct RapierSt<'t> {
 impl<'t> RapierSt<'t> {
     pub(crate) fn new() -> Self {
         RapierSt {
-            envs: vec![EnvNode { entry: Entry::Val(crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0), 0), parent: 0, len: 0, jump: 0, canonical: true }],
+            envs: vec![EnvNode { entry: Entry::Val(crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0), 0), parent: 0, len: 0, jump: 0 }],
             env_intern: new_fx_hash_map(),
             infer_cache_check: new_fx_hash_map(),
             infer_cache_only: new_fx_hash_map(),
-            infer_s_cache: new_fx_hash_map(),
             whnf_cache: new_fx_hash_map(),
             eq_pos: new_fx_hash_set(),
             eq_neg: new_fx_hash_set(),
-            eq_s_pos: new_fx_hash_set(),
-            eq_s_neg: new_fx_hash_set(),
-            reify_cache: new_fx_hash_map(),
             reify_go_cache: new_fx_hash_map(),
-            chase_cache: new_fx_hash_map(),
-            restr_cache: new_fx_hash_map(),
             abs_cache: new_fx_hash_map(),
             eq_mod_cache: new_fx_hash_map(),
             clo_fvar_cache: new_fx_hash_map(),
-            g_whnf: FxHashMap::with_capacity_and_hasher(1 << 18, Default::default()),
-            g_infer: FxHashMap::with_capacity_and_hasher(1 << 18, Default::default()),
             g_unfold: FxHashMap::with_capacity_and_hasher(1 << 16, Default::default()),
             g_inst_ty: FxHashMap::with_capacity_and_hasher(1 << 18, Default::default()),
             g_eq_pos: FxHashSet::with_capacity_and_hasher(1 << 16, Default::default()),
             g_eq_neg: FxHashSet::with_capacity_and_hasher(1 << 16, Default::default()),
-            lvl_eq_cache: new_fx_hash_map(),
             ctrs: [0; 12],
         }
     }
@@ -192,16 +167,10 @@ impl<'t> RapierSt<'t> {
         rm(&mut self.env_intern);
         rm(&mut self.infer_cache_check);
         rm(&mut self.infer_cache_only);
-        rm(&mut self.infer_s_cache);
         rm(&mut self.whnf_cache);
         rs(&mut self.eq_pos);
         rs(&mut self.eq_neg);
-        rs(&mut self.eq_s_pos);
-        rs(&mut self.eq_s_neg);
-        rm(&mut self.reify_cache);
         rm(&mut self.reify_go_cache);
-        rm(&mut self.chase_cache);
-        rm(&mut self.restr_cache);
         rm(&mut self.abs_cache);
         rm(&mut self.eq_mod_cache);
         rm(&mut self.clo_fvar_cache);
@@ -232,7 +201,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if d1 == d2 { j.jump } else { env }
         };
         let id = u32::try_from(self.ctx.rp.envs.len()).unwrap();
-        self.ctx.rp.envs.push(EnvNode { entry, parent: env, len, jump, canonical: false });
+        self.ctx.rp.envs.push(EnvNode { entry, parent: env, len, jump });
         self.ctx.rp.env_intern.insert(key, id);
         id
     }
@@ -298,10 +267,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    /// Cache-key normalization: resolve bvar heads to the entry they denote,
-    /// then restrict σ to the loose-bvar range of e (entries beyond it cannot
-    /// influence the result), recursively canonicalizing val entries. Two
-    /// closures that denote the same substitution instance then share keys.
+    /// Cache-key normalization: resolve bvar heads to the entry they denote;
+    /// a closed result drops its environment.
     fn rp_norm_clo(&mut self, c: Clo<'t>) -> Clo<'t> {
         let n = self.ctx.read_expr(c.e);
         let (c, lbr) = if matches!(n, Var { .. }) {
@@ -313,43 +280,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if lbr == 0 {
             return Clo::of(c.e);
         }
-        let env = self.rp_restrict_env(lbr, c.env);
-        Clo { e: c.e, env }
-    }
-
-    /// Content-canonical environment containing exactly the first `lbr`
-    /// entries of `env` (all a term with loose-bvar range `lbr` can reach).
-    fn rp_restrict_env(&mut self, lbr: u16, env: EnvId) -> EnvId {
-        if lbr == 0 || env == ENV_NIL {
-            return ENV_NIL;
-        }
-        {
-            let n = &self.ctx.rp.envs[env as usize];
-            if n.canonical && n.len == lbr as u32 {
-                return env;
-            }
-        }
-        let key = (lbr, env);
-        if let Some(&r) = self.ctx.rp.restr_cache.get(&key) {
-            return r;
-        }
-        let mut out = ENV_NIL;
-        for i in (0..lbr).rev() {
-            let ent = match self.rp_lookup(env, i) {
-                Entry::Val(e2, s2) => {
-                    let l2 = self.lbr(e2);
-                    let r2 = self.rp_restrict_env(l2, s2);
-                    Entry::Val(e2, r2)
-                }
-                n @ Entry::Neu(_) => n,
-            };
-            out = self.rp_push_entry(out, ent);
-            // the chain up to here restricts a suffix of env's first `lbr`
-            // entries, with all val entries canonically restricted
-            self.ctx.rp.envs[out as usize].canonical = true;
-        }
-        self.ctx.rp.restr_cache.insert(key, out);
-        out
+        c
     }
 
     // ---- reify ----
@@ -358,16 +289,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if c.env == ENV_NIL || self.lbr(c.e) == 0 {
             return c.e;
         }
-        if let Some(&r) = self.ctx.rp.reify_cache.get(&c) {
-            return r;
-        }
-        let ck = self.rp_norm_clo(c);
-        if let Some(&r) = self.ctx.rp.reify_cache.get(&ck) {
-            return r;
-        }
-        let r = self.rp_reify_go(c.env, 0, c.e);
-        self.ctx.rp.reify_cache.insert(ck, r);
-        r
+        self.rp_reify_go(c.env, 0, c.e)
     }
 
     fn rp_reify_go(&mut self, env: EnvId, offset: u16, e: ExprPtr<'t>) -> ExprPtr<'t> {
@@ -453,7 +375,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if j >= boff {
                 return match self.rp_lookup(benv, j - boff) {
                     Entry::Val(e2, env2) => self.rp_eq_mod(ae, aenv, aoff, e2, env2, 0),
-                    Entry::Neu(fv) => self.rp_eq_mod_neu_rev(ae, aenv, aoff, fv),
+                    Entry::Neu(fv) => self.rp_eq_mod_neu(fv, ae, aenv, aoff),
                 };
             }
         }
@@ -523,36 +445,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         r
     }
 
-    fn rp_eq_mod_neu(&mut self, fv: ExprPtr<'t>, be: ExprPtr<'t>, benv: EnvId, boff: u16) -> bool {
-        if let Var { dbj_idx: j, .. } = self.ctx.read_expr(be) {
-            if j >= boff {
-                return match self.rp_lookup(benv, j - boff) {
+    /// Does the closure `(e, env, off)` denote exactly the free variable `fv`?
+    fn rp_eq_mod_neu(&mut self, fv: ExprPtr<'t>, e: ExprPtr<'t>, env: EnvId, off: u16) -> bool {
+        if let Var { dbj_idx: j, .. } = self.ctx.read_expr(e) {
+            if j >= off {
+                return match self.rp_lookup(env, j - off) {
                     Entry::Val(e2, env2) => self.rp_eq_mod_neu(fv, e2, env2, 0),
                     Entry::Neu(g) => fv == g,
                 };
             }
             return false;
         }
-        be == fv
-    }
-
-    fn rp_eq_mod_neu_rev(
-        &mut self,
-        ae: ExprPtr<'t>,
-        aenv: EnvId,
-        aoff: u16,
-        fv: ExprPtr<'t>,
-    ) -> bool {
-        if let Var { dbj_idx: i, .. } = self.ctx.read_expr(ae) {
-            if i >= aoff {
-                return match self.rp_lookup(aenv, i - aoff) {
-                    Entry::Val(e2, env2) => self.rp_eq_mod_neu_rev(e2, env2, 0, fv),
-                    Entry::Neu(g) => g == fv,
-                };
-            }
-            return false;
-        }
-        ae == fv
+        e == fv
     }
 
     fn rp_s_quick_eq(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> bool {
@@ -586,30 +490,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             NatLit { .. } | StringLit { .. } | Sort { .. } | Pi { .. } | Lambda { .. }
             | Local { .. } => return SClo { head: c, spine: Vec::new() },
             _ => {}
-        }
-        if let Some(ge) = self.rp_global_key(c) {
-            if let Some((h, sp)) = self.ctx.rp.g_whnf.get(&ge) {
-                let (h, sp) = (*h, sp.clone());
-                self.ctx.rp.ctrs[6] += 1;
-                return SClo {
-                    head: Clo::of(h),
-                    spine: sp.iter().map(|&e| Clo::of(e)).collect(),
-                };
-            }
-            self.ctx.rp.ctrs[7] += 1;
-            let s = self.rp_mk_sclo(c);
-            let r = self.rp_whnf(s);
-            // store env-free: reify all components
-            let h = self.rp_reify(r.head);
-            let sp: Box<[ExprPtr<'t>]> = {
-                let args: Vec<ExprPtr<'t>> = r.spine.iter().map(|&x| self.rp_reify(x)).collect();
-                args.into_boxed_slice()
-            };
-            self.ctx.rp.g_whnf.insert(ge, (h, sp.clone()));
-            return SClo {
-                head: Clo::of(h),
-                spine: sp.iter().map(|&e| Clo::of(e)).collect(),
-            };
         }
         if let Some(r) = self.ctx.rp.whnf_cache.get(&c) {
             let r = r.clone();
@@ -730,25 +610,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         SClo { head: Clo { e, env }, spine: rsp }
     }
 
-    /// Follow bvar -> Val chains to their base, with path compression: long
-    /// chains (Nat.below towers) are resolved once and memoized per link.
-    /// Neu entries resolve to the fvar expr. Returns the input unchanged only
-    /// for non-bvar heads.
+    /// Follow bvar -> Val chains to their base. Neu entries resolve to the
+    /// fvar expr. Returns the input unchanged only for non-bvar heads.
     fn rp_chase(&mut self, e0: ExprPtr<'t>, env0: EnvId) -> (ExprPtr<'t>, EnvId) {
         let mut e = e0;
         let mut env = env0;
-        let mut trail: Vec<(ExprPtr<'t>, EnvId)> = Vec::new();
         loop {
             let i = match self.ctx.read_expr(e) {
                 Var { dbj_idx, .. } => dbj_idx,
                 _ => break,
             };
-            if let Some(&r) = self.ctx.rp.chase_cache.get(&(e, env)) {
-                e = r.0;
-                env = r.1;
-                break;
-            }
-            trail.push((e, env));
             match self.rp_lookup(env, i) {
                 Entry::Neu(fv) => {
                     e = fv;
@@ -760,9 +631,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     env = env2;
                 }
             }
-        }
-        for key in trail {
-            self.ctx.rp.chase_cache.insert(key, (e, env));
         }
         (e, env)
     }
@@ -859,93 +727,88 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         Some(SClo { head: Clo::of(e), spine: Vec::new() })
     }
 
+    /// The Nat primitive this spined application would dispatch to, if any.
+    /// Shared by `rp_reduce_nat` and lazy-delta's cheap pre-test.
+    fn rp_nat_op(&self, s: &SClo<'t>) -> Option<NatOp> {
+        let f = match self.ctx.read_expr(s.head.e) {
+            Const { name, levels, .. } if self.ctx.read_levels(levels).is_empty() => Some(name),
+            _ => return None,
+        };
+        use NatOp::*;
+        let nc = self.ctx.export_file.name_cache;
+        let (op, arity) = if f == nc.nat_succ {
+            (Succ, 1)
+        } else if f == nc.nat_add {
+            (Add, 2)
+        } else if f == nc.nat_sub {
+            (Sub, 2)
+        } else if f == nc.nat_mul {
+            (Mul, 2)
+        } else if f == nc.nat_pow {
+            (Pow, 2)
+        } else if f == nc.nat_gcd {
+            (Gcd, 2)
+        } else if f == nc.nat_mod {
+            (Mod, 2)
+        } else if f == nc.nat_div {
+            (Div, 2)
+        } else if f == nc.nat_beq {
+            (Beq, 2)
+        } else if f == nc.nat_ble {
+            (Ble, 2)
+        } else if f == nc.nat_land {
+            (LAnd, 2)
+        } else if f == nc.nat_lor {
+            (LOr, 2)
+        } else if f == nc.nat_xor {
+            (XOr, 2)
+        } else if f == nc.nat_shl {
+            (Shl, 2)
+        } else if f == nc.nat_shr {
+            (Shr, 2)
+        } else {
+            return None;
+        };
+        (s.spine.len() == arity).then_some(op)
+    }
+
     fn rp_reduce_nat(&mut self, s: &SClo<'t>) -> Option<SClo<'t>> {
         if !self.ctx.export_file.config.nat_extension {
             return None;
         }
-        let f = match self.ctx.read_expr(s.head.e) {
-            Const { name, levels, .. } if self.ctx.read_levels(levels).is_empty() => name,
-            _ => return None,
-        };
-        let nc = self.ctx.export_file.name_cache;
-        if s.spine.len() == 1 {
-            if Some(f) == nc.nat_succ {
-                if let Some(v) = self.rp_nat_lit(s.spine[0]) {
-                    return Some(self.rp_mk_nat_sclo(v + 1u32));
-                }
-            }
+        use NatOp::*;
+        let op = self.rp_nat_op(s)?;
+        if op == Succ {
+            let v = self.rp_nat_lit(s.spine[0])?;
+            return Some(self.rp_mk_nat_sclo(v + 1u32));
+        }
+        // exponent/shift bound is checked before the base is forced
+        let b = self.rp_nat_lit(s.spine[1])?;
+        if matches!(op, Pow | Shl) && b > BigUint::from(1u32 << 24) {
             return None;
         }
-        if s.spine.len() != 2 {
-            return None;
-        }
-        macro_rules! bin {
-            ($op:expr) => {{
-                let v1 = self.rp_nat_lit(s.spine[0])?;
-                let v2 = self.rp_nat_lit(s.spine[1])?;
-                #[allow(clippy::redundant_closure_call)]
-                let r: BigUint = ($op)(v1, v2);
-                return Some(self.rp_mk_nat_sclo(r));
-            }};
-        }
-        macro_rules! pred {
-            ($op:expr) => {{
-                let v1 = self.rp_nat_lit(s.spine[0])?;
-                let v2 = self.rp_nat_lit(s.spine[1])?;
-                #[allow(clippy::redundant_closure_call)]
-                let r: bool = ($op)(&v1, &v2);
-                return self.rp_mk_bool_sclo(r);
-            }};
-        }
-        if Some(f) == nc.nat_add {
-            bin!(|a: BigUint, b: BigUint| a + b)
-        } else if Some(f) == nc.nat_sub {
-            bin!(nat_sub)
-        } else if Some(f) == nc.nat_mul {
-            bin!(|a: BigUint, b: BigUint| a * b)
-        } else if Some(f) == nc.nat_pow {
-            let v2 = self.rp_nat_lit(s.spine[1])?;
-            if v2 > BigUint::from(1u32 << 24) {
-                return None;
-            }
-            let v1 = self.rp_nat_lit(s.spine[0])?;
-            let r = num_traits::pow::Pow::pow(v1, v2.to_u32().unwrap());
-            Some(self.rp_mk_nat_sclo(r))
-        } else if Some(f) == nc.nat_gcd {
-            bin!(|a: BigUint, b: BigUint| nat_gcd(&a, &b))
-        } else if Some(f) == nc.nat_mod {
-            bin!(nat_mod)
-        } else if Some(f) == nc.nat_div {
-            bin!(nat_div)
-        } else if Some(f) == nc.nat_beq {
-            pred!(|a: &BigUint, b: &BigUint| a == b)
-        } else if Some(f) == nc.nat_ble {
-            pred!(|a: &BigUint, b: &BigUint| a <= b)
-        } else if Some(f) == nc.nat_land {
-            bin!(nat_land)
-        } else if Some(f) == nc.nat_lor {
-            bin!(nat_lor)
-        } else if Some(f) == nc.nat_xor {
-            bin!(|a: BigUint, b: BigUint| nat_xor(&a, &b))
-        } else if Some(f) == nc.nat_shl {
-            let v2 = self.rp_nat_lit(s.spine[1])?;
-            if v2 > BigUint::from(1u32 << 24) {
-                return None;
-            }
-            let v1 = self.rp_nat_lit(s.spine[0])?;
-            let r = v1 << v2.to_u64().unwrap();
-            Some(self.rp_mk_nat_sclo(r))
-        } else if Some(f) == nc.nat_shr {
-            let v2 = self.rp_nat_lit(s.spine[1])?;
-            let v1 = self.rp_nat_lit(s.spine[0])?;
-            let r = match v2.to_u64() {
-                Some(sh) => v1 >> sh,
+        let a = self.rp_nat_lit(s.spine[0])?;
+        let r = match op {
+            Succ => unreachable!(),
+            Beq => return self.rp_mk_bool_sclo(a == b),
+            Ble => return self.rp_mk_bool_sclo(a <= b),
+            Add => a + b,
+            Sub => nat_sub(a, b),
+            Mul => a * b,
+            Pow => num_traits::pow::Pow::pow(a, b.to_u32().unwrap()),
+            Gcd => nat_gcd(&a, &b),
+            Mod => nat_mod(a, b),
+            Div => nat_div(a, b),
+            LAnd => nat_land(a, b),
+            LOr => nat_lor(a, b),
+            XOr => nat_xor(&a, &b),
+            Shl => a << b.to_u64().unwrap(),
+            Shr => match b.to_u64() {
+                Some(sh) => a >> sh,
                 None => BigUint::zero(),
-            };
-            Some(self.rp_mk_nat_sclo(r))
-        } else {
-            None
-        }
+            },
+        };
+        Some(self.rp_mk_nat_sclo(r))
     }
 
     /// `rsp` is the reversed spine (last = innermost arg). Returns the reduct
@@ -1201,31 +1064,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         r
     }
 
-    fn rp_sclo_key(&self, s: &SClo<'t>) -> SKey<'t> {
-        (self.rp_key(s.head), s.spine.iter().map(|&c| self.rp_key(c)).collect())
-    }
-
     fn rp_is_def_eq_s(&mut self, t: SClo<'t>, s: SClo<'t>) -> bool {
         let tn = self.rp_whnf_core_ext(t, false, false);
         let sn = self.rp_whnf_core_ext(s, false, false);
         if self.rp_s_quick_eq(&tn, &sn) {
             return true;
         }
-        let (k1, k2) = (self.rp_sclo_key(&tn), self.rp_sclo_key(&sn));
-        let pk = if skey_le(&k1, &k2) { (k1, k2) } else { (k2, k1) };
-        if self.ctx.rp.eq_s_pos.contains(&pk) {
-            return true;
-        }
-        if self.ctx.rp.eq_s_neg.contains(&pk) {
-            return false;
-        }
-        let r = self.rp_is_def_eq_s_core(tn, sn);
-        if r {
-            self.ctx.rp.eq_s_pos.insert(pk);
-        } else {
-            self.ctx.rp.eq_s_neg.insert(pk);
-        }
-        r
+        self.rp_is_def_eq_s_core(tn, sn)
     }
 
     fn rp_is_def_eq_s_core(&mut self, tn: SClo<'t>, sn: SClo<'t>) -> bool {
@@ -1310,16 +1155,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn rp_lvl_eq1(&mut self, l1: LevelPtr<'t>, l2: LevelPtr<'t>) -> bool {
-        if l1 == l2 {
-            return true;
-        }
-        let k = if l1.get_hash() <= l2.get_hash() { (l1, l2) } else { (l2, l1) };
-        if let Some(&r) = self.ctx.rp.lvl_eq_cache.get(&k) {
-            return r;
-        }
-        let r = self.ctx.eq_antisymm(l1, l2);
-        self.ctx.rp.lvl_eq_cache.insert(k, r);
-        r
+        l1 == l2 || self.ctx.eq_antisymm(l1, l2)
     }
 
     fn rp_lvl_eq_list(&mut self, ls: LevelsPtr<'t>, rs: LevelsPtr<'t>) -> bool {
@@ -1456,37 +1292,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         false
     }
 
-    /// Would `reduce_nat` even dispatch on this head? Cheap pre-test so the
-    /// fvar-occurrence probe only runs where a reduction could fire.
-    fn rp_nat_op_head(&self, s: &SClo<'t>) -> bool {
-        let f = match self.ctx.read_expr(s.head.e) {
-            Const { name, levels, .. } if self.ctx.read_levels(levels).is_empty() => name,
-            _ => return false,
-        };
-        let nc = &self.ctx.export_file.name_cache;
-        let f = Some(f);
-        match s.spine.len() {
-            1 => f == nc.nat_succ,
-            2 => {
-                f == nc.nat_add
-                    || f == nc.nat_sub
-                    || f == nc.nat_mul
-                    || f == nc.nat_pow
-                    || f == nc.nat_gcd
-                    || f == nc.nat_mod
-                    || f == nc.nat_div
-                    || f == nc.nat_beq
-                    || f == nc.nat_ble
-                    || f == nc.nat_land
-                    || f == nc.nat_lor
-                    || f == nc.nat_xor
-                    || f == nc.nat_shl
-                    || f == nc.nat_shr
-            }
-            _ => false,
-        }
-    }
-
     fn rp_nat_zero_s(&mut self, t: &SClo<'t>) -> bool {
         t.spine.is_empty() && self.ctx.is_nat_zero(t.head.e)
     }
@@ -1537,7 +1342,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Some(b) = self.rp_def_eq_offset(&tn, &sn) {
             return Ok(b);
         }
-        if (self.rp_nat_op_head(&tn) || self.rp_nat_op_head(&sn))
+        if (self.rp_nat_op(&tn).is_some() || self.rp_nat_op(&sn).is_some())
             && !self.rp_sclo_has_fvar(&tn)
             && !self.rp_sclo_has_fvar(&sn)
         {
@@ -1816,13 +1621,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             Lambda { .. } | Pi { .. } | Let { .. } | App { .. } | Proj { .. } => {
                 let key = self.rp_key(c);
-                if flag == InferOnly {
-                    if let Some(ge) = self.rp_global_key(key) {
-                        if let Some(&r) = self.ctx.rp.g_infer.get(&ge) {
-                            return r;
-                        }
-                    }
-                }
                 let cached = match flag {
                     Check => self.ctx.rp.infer_cache_check.get(&key),
                     InferOnly => self.ctx.rp.infer_cache_only.get(&key),
@@ -1843,11 +1641,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     }
                     _ => unreachable!(),
                 };
-                if flag == InferOnly && !self.ctx.has_fvars(r) {
-                    if let Some(ge) = self.rp_global_key(key) {
-                        self.ctx.rp.g_infer.insert(ge, r);
-                    }
-                }
                 match flag {
                     Check => self.ctx.rp.infer_cache_check.insert(key, r),
                     InferOnly => self.ctx.rp.infer_cache_only.insert(key, r),
@@ -2009,10 +1802,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if s.spine.is_empty() {
             return self.rp_infer(s.head, flag);
         }
-        let key = self.rp_sclo_key(s);
-        if let Some(&r) = self.ctx.rp.infer_s_cache.get(&key) {
-            return r;
-        }
         let mut f_ty: Clo<'t> = Clo::of(self.rp_infer(s.head, flag));
         for &arg in s.spine.iter() {
             let fw = if matches!(self.ctx.read_expr(f_ty.e), Pi { .. }) {
@@ -2037,7 +1826,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             f_ty = Clo { e: body, env: env2 };
         }
         let r = self.rp_reify(f_ty);
-        self.ctx.rp.infer_s_cache.insert(key, r);
         r
     }
 
