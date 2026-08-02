@@ -1013,17 +1013,24 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if major_idx >= len {
             return None;
         }
+        // K conversion runs on the unevaluated major: it inspects only the
+        // major's type, so a K-recursor's proof argument is replaced by the
+        // nullary constructor without ever being reduced. The major itself is
+        // whnf'd only afterwards (trivial when the conversion fired).
         let mut mj = if cheap_rec {
             let s0 = self.rp_mk_sclo(idx(major_idx));
             self.rp_whnf_core_ext(s0, cheap_rec, cheap_proj)
+        } else if is_k && major_induct.is_some() {
+            let s0 = self.rp_mk_sclo(idx(major_idx));
+            let conv = self.rp_to_ctor_when_k(num_params, major_induct.unwrap(), s0.clone());
+            if conv.head == s0.head && conv.spine == s0.spine {
+                self.rp_whnf_clo(idx(major_idx))
+            } else {
+                self.rp_whnf(conv)
+            }
         } else {
             self.rp_whnf_clo(idx(major_idx))
         };
-        if is_k && !cheap_rec {
-            if let Some(mi) = major_induct {
-                mj = self.rp_to_ctor_when_k(num_params, mi, mj);
-            }
-        }
         mj = self.rp_lit_to_ctor(mj);
         if !cheap_rec {
             if let Some(mi) = major_induct {
