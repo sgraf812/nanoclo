@@ -253,6 +253,10 @@ impl<'x, 'a: 'x> Env<'x, 'a> {
         Self { declars, cutoff, temp_declars, notation }
     }
 
+    /// Whether this environment carries a temporary extension (used while
+    /// checking nested inductives).
+    pub(crate) fn has_temp_ext(&self) -> bool { self.temp_declars.is_some() }
+
     /// Retrieve a declaration by first checking the contents of any temporary extension,
     /// then checking the persistent environment.
     pub fn get_declar(&self, n: &NamePtr<'a>) -> Option<&Declar<'a>> {

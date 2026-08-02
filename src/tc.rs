@@ -57,9 +57,6 @@ pub(crate) enum InferFlag {
 }
 
 pub struct TypeChecker<'x, 't, 'p> {
-    /// The rapier delayed-instantiation core's state (interned environments
-    /// and caches); see `rapier_core.rs`.
-    pub(crate) rp: crate::rapier_core::RapierSt<'t>,
     pub(crate) ctx: &'x mut TcCtx<'t, 'p>,
     /// An immutable reference to an environment, which contains declarations and notation.
     /// To accommodate the temporary declarations created while checking nested inductives,
@@ -82,25 +79,35 @@ pub struct TypeChecker<'x, 't, 'p> {
 }
 
 impl<'p> ExportFile<'p> {
-    /// The entry point for checking a declaration `d`.
+    /// The entry point for checking a declaration `d`, creating a fresh
+    /// checking context. The bulk-checking drivers instead keep one context
+    /// per thread and use `check_declar_in`.
     pub fn check_declar(&self, d: &Declar<'p>) {
+        self.with_ctx(|ctx| self.check_declar_in(ctx, d))
+    }
+
+    /// Check a declaration in an existing context. The rapier core's
+    /// per-declaration state (open-term caches, interned environments) is
+    /// cleared here; its per-thread global caches persist.
+    pub fn check_declar_in<'t>(&'t self, ctx: &mut TcCtx<'t, 'p>, d: &Declar<'p>) {
+        ctx.rp.reset_decl();
         use Declar::*;
         match d {
-            Axiom { .. } => self.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()),
-            Inductive(..) => self.check_inductive_declar(d),
-            Quot { .. } => self.with_ctx(|ctx| crate::quot::check_quot(ctx, d)),
+            Axiom { .. } => ctx.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()),
+            Inductive(..) => self.check_inductive_declar_in(ctx, d),
+            Quot { .. } => crate::quot::check_quot(ctx, d),
             Definition { val, .. } | Theorem { val, .. } | Opaque { val, .. } =>
-                self.with_tc_and_declar(*d.info(), |tc| {
+                ctx.with_tc_and_declar(*d.info(), |tc| {
                     tc.check_declar_info(d).unwrap();
                     let inferred_type = tc.infer(*val, crate::tc::InferFlag::Check);
                     tc.assert_def_eq(inferred_type, d.info().ty);
                 }),
             Constructor(ctor_data) => {
-                self.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap());
+                ctx.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap());
                 assert!(self.declars.get(&ctor_data.inductive_name).is_some());
             }
             Recursor(recursor_data) => {
-                self.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap());
+                ctx.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap());
                 for ind_name in recursor_data.all_inductives.iter() {
                     assert!(self.declars.get(ind_name).is_some())
                 }
@@ -109,15 +116,24 @@ impl<'p> ExportFile<'p> {
     }
 
     /// Check all declarations in this export file using a single thread.
-    /// Runs on a dedicated large-stack thread; the rapier core recurses over
-    /// term structure.
+    /// Runs on a dedicated large-stack thread (the rapier core recurses over
+    /// term structure) with one context reused for all declarations.
     pub(crate) fn check_all_declars_serial(&self) {
         std::thread::scope(|sco| {
             std::thread::Builder::new()
                 .stack_size(crate::STACK_SIZE)
                 .spawn_scoped(sco, || {
+                    let mut dag = crate::util::LeanDag::new(&self.config);
+                    // sized so that consing rehashes of the long-lived dag are rare
+                    dag.exprs.reserve(1 << 21);
+                    let mut ctx = TcCtx::new(self, &mut dag);
                     for declar in self.declars.values() {
-                        self.check_declar(declar);
+                        self.check_declar_in(&mut ctx, declar);
+                    }
+                    if std::env::var("RAPIER_STATS").is_ok() {
+                        let c = &ctx.rp.ctrs;
+                        eprintln!("infer={} whnfCore={} whnf={} defeq={} whnfH/M={}/{} gwhnfH/M={}/{} unfH/M={}/{} push={} eqMod={} dagExprs={}",
+                            c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], ctx.dag.exprs.len());
                     }
                 })
                 .unwrap()
@@ -127,7 +143,7 @@ impl<'p> ExportFile<'p> {
     }
 
     /// Check all declarations in this export file, spawning `num_threads` as
-    /// checkers.
+    /// checkers, each with one context reused for all of its declarations.
     fn check_all_declars_par(&self, num_threads: usize) {
         use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
         use std::thread;
@@ -139,12 +155,17 @@ impl<'p> ExportFile<'p> {
                     thread::Builder::new()
                         .name(format!("thread_{}", i))
                         .stack_size(crate::STACK_SIZE)
-                        .spawn_scoped(sco, || loop {
-                            let idx = task_num.fetch_add(1, Relaxed);
-                            if let Some((_, declar)) = self.declars.get_index(idx) {
-                                self.check_declar(declar);
-                            } else {
-                                break
+                        .spawn_scoped(sco, || {
+                            let mut dag = crate::util::LeanDag::new(&self.config);
+                            dag.exprs.reserve(1 << 21);
+                            let mut ctx = TcCtx::new(self, &mut dag);
+                            loop {
+                                let idx = task_num.fetch_add(1, Relaxed);
+                                if let Some((_, declar)) = self.declars.get_index(idx) {
+                                    self.check_declar_in(&mut ctx, declar);
+                                } else {
+                                    break
+                                }
                             }
                         })
                         .unwrap(),
@@ -171,7 +192,7 @@ impl<'p> ExportFile<'p> {
 impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub fn new(dag: &'x mut TcCtx<'t, 'p>, env: &'x Env<'x, 't>, declar_info: Option<DeclarInfo<'t>>) -> Self {
         assert_eq!(dag.dbj_level_counter, 0);
-        Self { rp: crate::rapier_core::RapierSt::new(), ctx: dag, env, tc_cache: TcCache::new(), declar_info }
+        Self { ctx: dag, env, tc_cache: TcCache::new(), declar_info }
     }
 
     /// Conduct the preliminary checks done on all declarations; a declaration

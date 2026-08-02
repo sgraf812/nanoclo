@@ -5,11 +5,11 @@ use crate::util::{ExportFile, ExprPtr, FxIndexMap, LevelPtr, LevelsPtr, NamePtr,
 use std::sync::Arc;
 
 impl<'t, 'p: 't> ExportFile<'p> {
-    pub(crate) fn check_inductive_declar(&self, d: &Declar<'t>) {
+    pub(crate) fn check_inductive_declar_in(&'t self, ctx: &mut TcCtx<'t, 'p>, d: &Declar<'t>) {
         let (ind, env_limit) = match d {
             Declar::Inductive(ind) => {
                 // Assert computed `is_recursive` value matches the export file.
-                let is_recursive = self.with_ctx(|ctx| {
+                let is_recursive = (|| {
                     for ctor_name in ind.all_ctor_names.iter() {
                         match self.declars.get(ctor_name).unwrap() {
                             Declar::Constructor(ctor_data @ ConstructorData {..}) => {
@@ -25,14 +25,14 @@ impl<'t, 'p: 't> ExportFile<'p> {
                         }
                     }
                     false
-                });
+                })();
                 assert_eq!(ind.is_recursive, is_recursive);
                 let (start, size) = self.mutual_block_sizes.get(&ind.info.name).unwrap();
                 (ind, crate::env::EnvLimit::ByIndex(start + size))
             }
             _ => panic!("expected inductive")
         };
-        self.with_ctx(|ctx| {
+        {
             // The **unmodified** types and constructors for all of the types in this mutual block.
             let unmodified_tys_ctors = ctx.with_tc(env_limit, |tc| {
                 tc.check_declar_info(d).unwrap();
@@ -91,7 +91,7 @@ impl<'t, 'p: 't> ExportFile<'p> {
                     tc.assert_nonnested_recursors_def_eq(&st, &recursors);
                 }
             })
-        })
+        }
     }
 }
 

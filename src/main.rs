@@ -1,3 +1,6 @@
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use nanoda_lib::util::Config;
 use std::error::Error;
 use std::path::Path;

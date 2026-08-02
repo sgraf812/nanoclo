@@ -272,7 +272,12 @@ pub struct TcCtx<'t, 'p> {
     pub(crate) unique_counter: u32,
     /// A cache for instantiation, free variable abstraction, and level substitution
     pub(crate) expr_cache: ExprCache<'t>,
-    pub(crate) eager_mode: bool
+    pub(crate) eager_mode: bool,
+    /// The rapier delayed-instantiation core's state (interned environments,
+    /// per-declaration caches, and per-thread global caches); see
+    /// `rapier_core.rs`. Lives here so that it can persist for the lifetime
+    /// of the context (one context per checking thread).
+    pub(crate) rp: crate::rapier_core::RapierSt<'t>,
 }
 
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
@@ -283,8 +288,19 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             dbj_level_counter: 0u16,
             unique_counter: 0u32,
             expr_cache: ExprCache::new(),
-            eager_mode: false
+            eager_mode: false,
+            rp: crate::rapier_core::RapierSt::new(),
         }
+    }
+
+    /// Like `ExportFile::with_tc_and_declar`, but reusing this context (and
+    /// its expression dag) instead of creating a fresh one.
+    pub fn with_tc_and_declar<F, A>(&mut self, d: crate::env::DeclarInfo<'p>, f: F) -> A
+    where
+        F: FnOnce(&mut TypeChecker<'_, 't, 'p>) -> A, {
+        let env = self.export_file.new_env(crate::env::EnvLimit::ByName(d.name));
+        let mut tc = TypeChecker::new(self, &env, Some(d));
+        f(&mut tc)
     }
 
     pub fn with_tc<F, A>(&mut self, env_limit: EnvLimit<'p>, f: F) -> A
@@ -390,13 +406,33 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
     /// Store an `Expr`, getting back a pointer to the allocated item. If the item was
     /// already stored, forego the allocation and return a pointer to the previously inserted
-    /// element. Checks the longer-lived storage first.
+    /// element. Checks the longer-lived storage first; that probe is skipped when `e`
+    /// references an item in this context's dag, since entries of the export file's dag
+    /// only reference other entries of the export file's dag.
     pub fn alloc_expr(&mut self, e: Expr<'t>) -> ExprPtr<'t> {
-        if let Some(idx) = self.export_file.dag.exprs.get_index_of(&e) {
-            Ptr::from(DagMarker::ExportFile, idx)
-        } else {
-            Ptr::from(DagMarker::TcCtx, self.dag.exprs.insert_full(e).0)
+        fn is_tc<A>(p: Ptr<A>) -> bool { p.dag_marker() == DagMarker::TcCtx }
+        let cannot_be_in_export = match &e {
+            Expr::StringLit { ptr, .. } => is_tc(*ptr),
+            Expr::NatLit { ptr, .. } => is_tc(*ptr),
+            Expr::Proj { ty_name, structure, .. } => is_tc(*ty_name) || is_tc(*structure),
+            Expr::Var { .. } => false,
+            Expr::Sort { level, .. } => is_tc(*level),
+            Expr::Const { name, levels, .. } => is_tc(*name) || is_tc(*levels),
+            Expr::App { fun, arg, .. } => is_tc(*fun) || is_tc(*arg),
+            Expr::Pi { binder_name, binder_type, body, .. }
+            | Expr::Lambda { binder_name, binder_type, body, .. } =>
+                is_tc(*binder_name) || is_tc(*binder_type) || is_tc(*body),
+            Expr::Let { binder_name, binder_type, val, body, .. } =>
+                is_tc(*binder_name) || is_tc(*binder_type) || is_tc(*val) || is_tc(*body),
+            Expr::Local { binder_name, binder_type, .. } =>
+                is_tc(*binder_name) || is_tc(*binder_type),
+        };
+        if !cannot_be_in_export {
+            if let Some(idx) = self.export_file.dag.exprs.get_index_of(&e) {
+                return Ptr::from(DagMarker::ExportFile, idx)
+            }
         }
+        Ptr::from(DagMarker::TcCtx, self.dag.exprs.insert_full(e).0)
     }
 
     /// Store a string (a `CowStr`), getting back a pointer to the allocated item. If the item was
