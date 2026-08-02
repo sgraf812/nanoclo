@@ -1,0 +1,1 @@
+{"export_file_path": null, "use_stdin": true, "permitted_axioms": ["propext", "Quot.sound", "Classical.choice", "baseC", "Pg", "pfg"], "unpermitted_axiom_hard_error": false, "num_threads": 4}

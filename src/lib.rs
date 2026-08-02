@@ -14,6 +14,7 @@ pub mod name;
 pub mod parser;
 pub mod pretty_printer;
 pub mod quot;
+pub mod rapier_core;
 pub mod tc;
 #[cfg(test)]
 mod tests;
@@ -21,4 +22,4 @@ pub mod union_find;
 pub mod unique_hasher;
 pub mod util;
 
-pub(crate) const STACK_SIZE: usize = 16_777_216;
+pub(crate) const STACK_SIZE: usize = 1 << 30;

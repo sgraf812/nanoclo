@@ -57,6 +57,9 @@ pub(crate) enum InferFlag {
 }
 
 pub struct TypeChecker<'x, 't, 'p> {
+    /// The rapier delayed-instantiation core's state (interned environments
+    /// and caches); see `rapier_core.rs`.
+    pub(crate) rp: crate::rapier_core::RapierSt<'t>,
     pub(crate) ctx: &'x mut TcCtx<'t, 'p>,
     /// An immutable reference to an environment, which contains declarations and notation.
     /// To accommodate the temporary declarations created while checking nested inductives,
@@ -106,10 +109,21 @@ impl<'p> ExportFile<'p> {
     }
 
     /// Check all declarations in this export file using a single thread.
+    /// Runs on a dedicated large-stack thread; the rapier core recurses over
+    /// term structure.
     pub(crate) fn check_all_declars_serial(&self) {
-        for declar in self.declars.values() {
-            self.check_declar(declar);
-        }
+        std::thread::scope(|sco| {
+            std::thread::Builder::new()
+                .stack_size(crate::STACK_SIZE)
+                .spawn_scoped(sco, || {
+                    for declar in self.declars.values() {
+                        self.check_declar(declar);
+                    }
+                })
+                .unwrap()
+                .join()
+                .expect("serial check thread panicked while being joined");
+        });
     }
 
     /// Check all declarations in this export file, spawning `num_threads` as
@@ -153,10 +167,11 @@ impl<'p> ExportFile<'p> {
     }
 }
 
+#[allow(dead_code)]
 impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub fn new(dag: &'x mut TcCtx<'t, 'p>, env: &'x Env<'x, 't>, declar_info: Option<DeclarInfo<'t>>) -> Self {
         assert_eq!(dag.dbj_level_counter, 0);
-        Self { ctx: dag, env, tc_cache: TcCache::new(), declar_info } 
+        Self { rp: crate::rapier_core::RapierSt::new(), ctx: dag, env, tc_cache: TcCache::new(), declar_info }
     }
 
     /// Conduct the preliminary checks done on all declarations; a declaration
@@ -479,7 +494,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
+    /// Delegates to the rapier delayed-instantiation core (`rapier_core.rs`).
     pub(crate) fn infer(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
+        self.rp_infer(crate::rapier_core::Clo::of(e), flag)
+    }
+
+    #[allow(dead_code)]
+    fn infer_upstream(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
         if let Some(cached) = self.tc_cache.infer_cache_check.get(&e).copied() {
             return cached
         }
@@ -730,30 +751,32 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         out
     }
 
+    /// Delegates to the rapier delayed-instantiation core (`rapier_core.rs`).
     pub fn whnf(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
-        if matches!(self.ctx.read_expr(e), NatLit { .. } | StringLit { .. }) {
-            return e
+        let s = self.rp_whnf_clo(crate::rapier_core::Clo::of(e));
+        let out = self.rp_sclo_to_expr(&s);
+        // mirror upstream whnf: sort levels come out simplified
+        if let Sort { level, .. } = self.ctx.read_expr(out) {
+            let level = self.ctx.simplify(level);
+            return self.ctx.mk_sort(level)
         }
-        if let Some(cached) = self.tc_cache.whnf_cache.get(&e).copied() {
-            return cached
-        }
-        let mut cursor = e;
-        loop {
-            let whnfd = self.whnf_no_unfolding(cursor);
-            if let Some(reduce_nat_ok) = self.try_reduce_nat(whnfd) {
-                cursor = reduce_nat_ok;
-            } else if let Some(next_term) = self.unfold_def(whnfd) {
-                cursor = next_term;
-            } else {
-                self.tc_cache.whnf_cache.insert(e, whnfd);
-                return whnfd
-            }
-        }
+        out
     }
 
+    #[allow(dead_code)]
     fn whnf_no_unfolding_cheap_proj(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> { self.whnf_no_unfolding_aux(e, true) }
 
-    pub fn whnf_no_unfolding(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> { self.whnf_no_unfolding_aux(e, false) }
+    /// whnf without delta unfolding: the rapier core's whnf_core.
+    pub fn whnf_no_unfolding(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
+        let s = self.rp_mk_sclo(crate::rapier_core::Clo::of(e));
+        let s = self.rp_whnf_core(s);
+        let out = self.rp_sclo_to_expr(&s);
+        if let Sort { level, .. } = self.ctx.read_expr(out) {
+            let level = self.ctx.simplify(level);
+            return self.ctx.mk_sort(level)
+        }
+        out
+    }
 
     fn whnf_no_unfolding_aux(&mut self, e: ExprPtr<'t>, cheap_proj: bool) -> ExprPtr<'t> {
         if let Some(cached) = self.tc_cache.whnf_no_unfolding_cache.get(&e).copied() {
@@ -921,7 +944,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     pub fn assert_def_eq(&mut self, u: ExprPtr<'t>, v: ExprPtr<'t>) { assert!(self.def_eq(u, v)) }
 
+    /// Delegates to the rapier delayed-instantiation core (`rapier_core.rs`).
     pub fn def_eq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
+        self.rp_is_def_eq(crate::rapier_core::Clo::of(x), crate::rapier_core::Clo::of(y))
+    }
+
+    #[allow(dead_code)]
+    fn def_eq_upstream(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
         if let Some(easy) = self.def_eq_quick_check(x, y) {
             return easy
         }
