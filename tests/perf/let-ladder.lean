@@ -1,6 +1,6 @@
 /-
 Reproducer for O(n²) kernel type-checking. Nested `let` bindings.
-From kraken, same family as kernel-congr-quadratic-mwe.lean.
+From kraken.
 
 Structure (for n=3):
   let x₃ : Nat := 0
@@ -9,14 +9,15 @@ Structure (for n=3):
   x₃ + (x₂ + (x₁ + 0))
 
 The body of each `let` still contains the next one, and the innermost sum
-references every binding, so each body has `loose_bvar_range > 0`.
+references every binding, so each body has `loose_bvar_range > 0`. No
+application heads are involved beyond `Nat.add`, so this exercises `let`
+processing on its own, with no beta reduction.
 
-`infer_let` substitutes the value into the body before checking it, and the
-body has size O(n) and contains the next `let`, so the kernel performs n
-substitutions each traversing O(n) nodes = O(n²) total. A checker that
-records the binding in an environment stays linear. This is the zeta
-counterpart of beta-ladder.lean; no application heads are involved, so it
-isolates `let` processing from beta reduction.
+A kernel that substitutes the value into the body before checking it
+traverses a body of size O(n) at each of the n bindings, and the result
+contains the next `let`, giving O(n²) total in time and in allocated
+nodes. Recording the binding and looking it up on demand makes each step
+O(1) and the whole term linear.
 
 For lean-kernel-arena:
   lean4export let-ladder.lean > test.jsonl

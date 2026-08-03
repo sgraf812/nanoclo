@@ -1,6 +1,6 @@
 /-
 Reproducer for O(n²) kernel type-checking. Nested beta redexes.
-From kraken, same family as kernel-congr-quadratic-mwe.lean.
+From kraken.
 
 Structure (for n=3):
   (fun x₃ : Nat =>
@@ -14,14 +14,14 @@ lambda still contains the next redex. The innermost sum references all
 enclosing binders, so every continuation body has `loose_bvar_range > 0`.
 
 Reducing the outer redex substitutes the argument into a body of size O(n),
-and the result contains the next redex, so the kernel performs n
-substitutions each traversing O(n) nodes = O(n²) total, in time and in
-allocated nodes. A checker that records the argument in an environment
-instead enters each binder in O(1) and stays linear.
+and the result contains the next redex, so a kernel that substitutes on
+beta reduction performs n substitutions each traversing O(n) nodes = O(n²)
+total, in time and in allocated nodes. Recording the argument as a binding
+instead makes each step O(1) and the whole term linear.
 
-Note that a *flat* spine `(fun x₁ ... xₙ => ...) a₁ ... aₙ` does not
-reproduce this: kernels collect the whole spine and substitute once. The
-redexes have to be nested.
+A *flat* spine `(fun x₁ ... xₙ => ...) a₁ ... aₙ` does not reproduce this:
+the whole application spine is collected and substituted in one traversal.
+The redexes have to be nested.
 
 For lean-kernel-arena:
   lean4export beta-ladder.lean > test.jsonl
