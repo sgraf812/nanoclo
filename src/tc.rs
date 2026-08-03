@@ -46,15 +46,14 @@ pub struct TypeChecker<'x, 't, 'p> {
 
 impl<'p> ExportFile<'p> {
     /// The entry point for checking a declaration `d`, creating a fresh
-    /// checking context. The bulk-checking drivers instead keep one context
-    /// per thread and use `check_declar_in`.
+    /// checking context, and with it a fresh expression dag: everything the
+    /// check interns is released when `d` is done. Terms parsed from the
+    /// export file live in the shared dag and are unaffected.
     pub fn check_declar(&self, d: &Declar<'p>) {
         self.with_ctx(|ctx| self.check_declar_in(ctx, d))
     }
 
-    /// Check a declaration in an existing context. The rapier core's
-    /// per-declaration state (open-term caches, interned environments) is
-    /// cleared here; its per-thread global caches persist.
+    /// Check a declaration in an existing context.
     pub fn check_declar_in<'t>(&'t self, ctx: &mut TcCtx<'t, 'p>, d: &Declar<'p>) {
         ctx.rp.reset_decl();
         use Declar::*;
@@ -83,23 +82,15 @@ impl<'p> ExportFile<'p> {
 
     /// Check all declarations in this export file using a single thread.
     /// Runs on a dedicated large-stack thread (the rapier core recurses over
-    /// term structure) with one context reused for all declarations.
+    /// term structure). Each declaration gets its own context, so the
+    /// expressions built while checking it are released when it finishes.
     pub(crate) fn check_all_declars_serial(&self) {
         std::thread::scope(|sco| {
             std::thread::Builder::new()
                 .stack_size(crate::STACK_SIZE)
                 .spawn_scoped(sco, || {
-                    let mut dag = crate::util::LeanDag::new(&self.config);
-                    // sized so that consing rehashes of the long-lived dag are rare
-                    dag.exprs.reserve(1 << 21);
-                    let mut ctx = TcCtx::new(self, &mut dag);
                     for declar in self.declars.values() {
-                        self.check_declar_in(&mut ctx, declar);
-                    }
-                    if std::env::var("RAPIER_STATS").is_ok() {
-                        let c = &ctx.rp.ctrs;
-                        eprintln!("infer={} whnfCore={} whnf={} defeq={} whnfH/M={}/{} gwhnfH/M={}/{} unfH/M={}/{} push={} eqMod={} dagExprs={}",
-                            c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], ctx.dag.exprs.len());
+                        self.check_declar(declar);
                     }
                 })
                 .unwrap()
@@ -121,17 +112,12 @@ impl<'p> ExportFile<'p> {
                     thread::Builder::new()
                         .name(format!("thread_{}", i))
                         .stack_size(crate::STACK_SIZE)
-                        .spawn_scoped(sco, || {
-                            let mut dag = crate::util::LeanDag::new(&self.config);
-                            dag.exprs.reserve(1 << 21);
-                            let mut ctx = TcCtx::new(self, &mut dag);
-                            loop {
-                                let idx = task_num.fetch_add(1, Relaxed);
-                                if let Some((_, declar)) = self.declars.get_index(idx) {
-                                    self.check_declar_in(&mut ctx, declar);
-                                } else {
-                                    break
-                                }
+                        .spawn_scoped(sco, || loop {
+                            let idx = task_num.fetch_add(1, Relaxed);
+                            if let Some((_, declar)) = self.declars.get_index(idx) {
+                                self.check_declar(declar);
+                            } else {
+                                break
                             }
                         })
                         .unwrap(),
