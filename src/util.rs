@@ -158,6 +158,8 @@ pub(crate) fn nat_xor(x: &BigUint, y: &BigUint) -> BigUint {
     x ^ y
 }
 
+
+
 pub(crate) fn nat_shl(x: BigUint, y: BigUint) -> BigUint {
     x * BigUint::from(2u8).pow(y)
 }
@@ -682,17 +684,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         self.alloc_expr(Expr::Local { binder_name, binder_style, binder_type, id, hash })
     }
 
-    /// "replace" a free variable when closing a binder, decrementing the deBruijn level
-    /// counter, so that level can be reused as appropriate.
-    pub(crate) fn replace_dbj_level(&mut self, e: ExprPtr<'t>) {
-        match self.read_expr(e) {
-            Expr::Local { id: FVarId::DbjLevel(level), .. } => {
-                debug_assert_eq!(level + 1, self.dbj_level_counter);
-                self.dbj_level_counter -= 1;
-            }
-            _ => panic!("replace_dbj_level didn't get a Local, got {:?}", self.debug_print(e)),
-        }
-    }
 
     /// Convert the deBruijn level of a free variable to a deBruijn index for a bound
     /// variable. This is the same thing as asking "if this element is the `nth` element

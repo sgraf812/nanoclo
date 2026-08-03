@@ -503,20 +503,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
-    pub(crate) fn pred_of_nat_succ(&mut self, e: ExprPtr<'t>) -> Option<ExprPtr<'t>> {
-        match self.read_expr(e) {
-            App { fun, arg, .. } if self.c_nat_succ() == Some(fun) => Some(arg),
-            NatLit { ptr, .. } => {
-                let n = self.read_bignum(ptr)?;
-                if n.is_zero() {
-                    None
-                } else {
-                    self.mk_nat_lit_quick(n - 1u8)
-                }
-            }
-            _ => None,
-        }
-    }
 
     /// Used in iota reduction (`reduce_rec`) to turn a bignum
     /// either `Nat.zero`, or `App (Nat.succ) (bignum - 1)`; in order to do iota reduction,
@@ -534,17 +520,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
     
-    /// Return `true` iff `e` is an application of `@eagerReduce A a`
-    pub(crate) fn is_eager_reduce_app(&self, e: ExprPtr<'t>) -> bool {
-        if let App {fun, ..} = self.read_expr(e) {
-            if let App {fun, ..} = self.read_expr(fun) {
-                if let Const {name, ..} = self.read_expr(fun) {
-                    return self.export_file.name_cache.eager_reduce == Some(name)
-                }
-            }
-        }
-        false
-    }
 
     /// Convert a string literal to `String.ofList <| List.cons (Char.ofNat _) .. List.nil`
     pub(crate) fn str_lit_to_constructor(&mut self, s: StringPtr<'t>) -> Option<ExprPtr<'t>> {
@@ -583,26 +558,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         Some(self.mk_app(string_of_list_const, out))
     }
 
-    /// If `e` is a NatLit, or `Const Nat.zero []`, return the appropriate Bignum.
-    pub(crate) fn get_bignum_from_expr(&mut self, e: ExprPtr<'t>) -> Option<BigUint> {
-        if let NatLit { ptr, .. } = self.read_expr(e) {
-            self.read_bignum(ptr).cloned()
-        } else if Some(e) == self.c_nat_zero() {
-            Some(BigUint::zero())
-        } else {
-            None
-        }
-    }
 
-    pub(crate) fn get_bignum_succ_from_expr(&mut self, e: ExprPtr<'t>) -> Option<ExprPtr<'t>> {
-        if let NatLit { ptr, .. } = self.read_expr(e) {
-            self.mk_nat_lit_quick(self.read_bignum(ptr)? + 1usize)
-        } else if Some(e) == self.c_nat_zero() {
-            self.mk_nat_lit_quick(BigUint::zero() + 1usize)
-        } else {
-            None
-        }
-    }
 
     /// Return the expression representing either `true` or `false`
     pub(crate) fn bool_to_expr(&mut self, b: bool) -> Option<ExprPtr<'t>> {
