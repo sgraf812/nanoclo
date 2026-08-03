@@ -99,11 +99,11 @@ pub(crate) struct RapierSt<'t> {
     whnf_cache: FxHashMap<Clo<'t>, SClo<'t>>,
     eq_pos: FxHashSet<(Clo<'t>, Clo<'t>)>,
     eq_neg: FxHashSet<(Clo<'t>, Clo<'t>)>,
-    reify_go_cache: FxHashMap<(ExprPtr<'t>, EnvId, u16), ExprPtr<'t>>,
+    reify_go_cache: Gen2<(ExprPtr<'t>, EnvId, u16), ExprPtr<'t>>,
     abs_cache: FxHashMap<(ExprPtr<'t>, ExprPtr<'t>, u16), ExprPtr<'t>>,
     /// keyed by the packed `(ae|aenv, be|benv, aoff|boff)` triple
-    eq_mod_cache: FxHashMap<(u64, u64, u32), bool>,
-    clo_fvar_cache: FxHashMap<(ExprPtr<'t>, EnvId, u16), bool>,
+    eq_mod_cache: Gen2<(u64, u64, u32), bool>,
+    clo_fvar_cache: Gen2<(ExprPtr<'t>, EnvId, u16), bool>,
 
     // Caches valid across declarations (per thread): keys and stored values
     // are closed (fvar-free, env-free) and refer only to constants visible at
@@ -139,10 +139,10 @@ impl<'t> RapierSt<'t> {
             whnf_cache: new_fx_hash_map(),
             eq_pos: new_fx_hash_set(),
             eq_neg: new_fx_hash_set(),
-            reify_go_cache: new_fx_hash_map(),
+            reify_go_cache: Gen2::new(),
             abs_cache: new_fx_hash_map(),
-            eq_mod_cache: new_fx_hash_map(),
-            clo_fvar_cache: new_fx_hash_map(),
+            eq_mod_cache: Gen2::new(),
+            clo_fvar_cache: Gen2::new(),
             g_unfold: FxHashMap::with_capacity_and_hasher(1 << 16, Default::default()),
             g_inst_ty: FxHashMap::with_capacity_and_hasher(1 << 18, Default::default()),
             g_eq_pos: FxHashSet::with_capacity_and_hasher(1 << 16, Default::default()),
@@ -176,10 +176,62 @@ impl<'t> RapierSt<'t> {
         rm(&mut self.whnf_cache);
         rs(&mut self.eq_pos);
         rs(&mut self.eq_neg);
-        rm(&mut self.reify_go_cache);
+        self.reify_go_cache.reset_decl();
         rm(&mut self.abs_cache);
-        rm(&mut self.eq_mod_cache);
-        rm(&mut self.clo_fvar_cache);
+        self.eq_mod_cache.reset_decl();
+        self.clo_fvar_cache.reset_decl();
+    }
+}
+
+/// Entry ceiling per memo table, tunable for experiments.
+fn ccap() -> usize {
+    static CCAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CCAP.get_or_init(|| {
+        std::env::var("RAPIER_CCAP").ok().and_then(|v| v.parse().ok()).unwrap_or(1 << 20)
+    })
+}
+
+/// Two-generation memo: entries land in `new`; when it fills, `new` becomes
+/// `old` and a fresh `new` starts. A hit in `old` is promoted, so entries
+/// that keep being used survive the swaps.
+pub(crate) struct Gen2<K, V> {
+    new: FxHashMap<K, V>,
+    old: FxHashMap<K, V>,
+}
+
+impl<K: std::hash::Hash + Eq + Copy, V: Copy> Gen2<K, V> {
+    fn new() -> Self {
+        Gen2 { new: new_fx_hash_map(), old: new_fx_hash_map() }
+    }
+
+    #[inline]
+    fn get(&mut self, k: &K) -> Option<V> {
+        if let Some(v) = self.new.get(k) {
+            return Some(*v);
+        }
+        let v = self.old.get(k).copied()?;
+        self.insert(*k, v);
+        Some(v)
+    }
+
+    #[inline]
+    fn insert(&mut self, k: K, v: V) {
+        if self.new.len() >= ccap() {
+            std::mem::swap(&mut self.new, &mut self.old);
+            self.new.clear();
+        }
+        self.new.insert(k, v);
+    }
+
+    fn reset_decl(&mut self) {
+        const KEEP: usize = 1 << 14;
+        for m in [&mut self.new, &mut self.old] {
+            if m.capacity() > KEEP {
+                *m = new_fx_hash_map();
+            } else {
+                m.clear();
+            }
+        }
     }
 }
 
@@ -304,7 +356,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return e;
         }
         let memo_key = (e, env, offset);
-        if let Some(&r) = self.ctx.rp.reify_go_cache.get(&memo_key) {
+        if let Some(r) = self.ctx.rp.reify_go_cache.get(&memo_key) {
             return r;
         }
         let r = match n {
@@ -418,7 +470,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             (kb, ka, (kb_off as u32) << 16 | ka_off as u32)
         };
         if composite {
-            if let Some(&r) = self.ctx.rp.eq_mod_cache.get(&memo_key) {
+            if let Some(r) = self.ctx.rp.eq_mod_cache.get(&memo_key) {
                 return r;
             }
         }
@@ -525,6 +577,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.ctx.rp.ctrs[5] += 1;
         let s = self.rp_mk_sclo(c);
         let r = self.rp_whnf(s);
+        // whnf_cache is never evicted: dropping a weak-head normal form makes
+        // the checker redo whole reduction sequences, which on nested redexes
+        // is the difference between linear and exponential. Measured on the
+        // nested-beta family at n=1500: ~1s with it intact, >90s when capped,
+        // while capping the other memos costs nothing even at 2^10.
         self.ctx.rp.whnf_cache.insert(c, r.clone());
         r
     }
@@ -1278,7 +1335,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return false;
         }
         let key = (e, env, offset);
-        if let Some(&r) = self.ctx.rp.clo_fvar_cache.get(&key) {
+        if let Some(r) = self.ctx.rp.clo_fvar_cache.get(&key) {
             return r;
         }
         let r = match n {
