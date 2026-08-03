@@ -92,6 +92,8 @@ impl<'p> ExportFile<'p> {
             std::thread::Builder::new()
                 .stack_size(crate::STACK_SIZE)
                 .spawn_scoped(sco, || {
+                    let thresh: u128 = std::env::var("RAPIER_DECLTIME")
+                        .ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
                     let report = std::env::var("RAPIER_DECLTIME").is_ok();
                     let skip: usize = std::env::var("RAPIER_SKIP_UNTIL")
                         .ok().and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -107,10 +109,14 @@ impl<'p> ExportFile<'p> {
                             }
                         }
                         if report {
+                            if thresh == 0 {
+                                self.with_ctx(|ctx| eprintln!(
+                                    "ENTER\t{}\t{:?}", i, ctx.debug_print(declar.info().name)));
+                            }
                             let t0 = std::time::Instant::now();
                             self.check_declar(declar);
                             let us = t0.elapsed().as_micros();
-                            if us >= 1000 {
+                            if us >= thresh {
                                 self.with_ctx(|ctx| {
                                     eprintln!("DECL\t{}\t{}\t{:?}", i, us, ctx.debug_print(declar.info().name))
                                 });

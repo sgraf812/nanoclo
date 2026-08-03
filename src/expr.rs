@@ -270,6 +270,17 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
+    /// Abstract every de Bruijn level at or above `start_pos`, as seen from
+    /// under `num_open_binders` binders.
+    pub(crate) fn abstr_levels_at(
+        &mut self,
+        e: ExprPtr<'t>,
+        start_pos: u16,
+        num_open_binders: u16,
+    ) -> ExprPtr<'t> {
+        self.abstr_aux_levels(e, start_pos, num_open_binders)
+    }
+
     pub fn abstr_levels(&mut self, e: ExprPtr<'t>, start_pos: u16) -> ExprPtr<'t> {
         self.expr_cache.abstr_cache_levels.clear();
         self.abstr_aux_levels(e, start_pos, self.dbj_level_counter)

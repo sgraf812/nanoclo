@@ -56,6 +56,8 @@ pub(crate) struct EnvNode<'t> {
     entry: Entry<'t>,
     parent: EnvId,
     len: u32,
+    /// one past the highest de Bruijn level bound anywhere in this chain
+    next_level: u16,
     /// Myers jump pointer for O(log n) indexing
     jump: EnvId,
 }
@@ -101,7 +103,8 @@ pub(crate) struct RapierSt<'t> {
     eq_pos: UnionFind<Clo<'t>>,
     eq_neg: FxHashSet<(Clo<'t>, Clo<'t>)>,
     reify_go_cache: Gen2<(ExprPtr<'t>, EnvId, u16), ExprPtr<'t>>,
-    abs_cache: FxHashMap<(ExprPtr<'t>, ExprPtr<'t>, u16), ExprPtr<'t>>,
+    /// `e -> one past the highest de Bruijn level of an fvar occurring in it`
+    lvl_cache: FxHashMap<ExprPtr<'t>, u16>,
     /// keyed by the packed `(ae|aenv, be|benv, aoff|boff)` triple
     eq_mod_cache: Gen2<(u64, u64, u32), bool>,
     clo_fvar_cache: Gen2<(ExprPtr<'t>, EnvId, u16), bool>,
@@ -152,7 +155,7 @@ pub fn ctrs_report() -> String {
 impl<'t> RapierSt<'t> {
     pub(crate) fn new() -> Self {
         RapierSt {
-            envs: vec![EnvNode { entry: Entry::Val(crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0), 0), parent: 0, len: 0, jump: 0 }],
+            envs: vec![EnvNode { entry: Entry::Val(crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0), 0), parent: 0, len: 0, next_level: 0, jump: 0 }],
             env_intern: new_fx_hash_map(),
             infer_cache_check: new_fx_hash_map(),
             infer_cache_only: new_fx_hash_map(),
@@ -160,7 +163,7 @@ impl<'t> RapierSt<'t> {
             eq_pos: UnionFind::new(),
             eq_neg: new_fx_hash_set(),
             reify_go_cache: Gen2::new(),
-            abs_cache: new_fx_hash_map(),
+            lvl_cache: new_fx_hash_map(),
             eq_mod_cache: Gen2::new(),
             clo_fvar_cache: Gen2::new(),
             g_unfold: FxHashMap::with_capacity_and_hasher(1 << 16, Default::default()),
@@ -206,7 +209,7 @@ impl<'t> RapierSt<'t> {
         self.eq_pos.clear();
         rs(&mut self.eq_neg);
         self.reify_go_cache.reset_decl();
-        rm(&mut self.abs_cache);
+        rm(&mut self.lvl_cache);
         self.eq_mod_cache.reset_decl();
         self.clo_fvar_cache.reset_decl();
     }
@@ -272,6 +275,45 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn rp_env_len(&self, env: EnvId) -> u32 { self.ctx.rp.envs[env as usize].len }
 
+    fn rp_env_next_level(&self, env: EnvId) -> u16 { self.ctx.rp.envs[env as usize].next_level }
+
+    /// One past the highest de Bruijn level carried by a free variable in
+    /// `e`. Free variables reach an expression only from the context it was
+    /// built in, so this is bounded by the depth of that context.
+    fn rp_max_level(&mut self, e: ExprPtr<'t>) -> u16 {
+        if !self.ctx.has_fvars(e) {
+            return 0;
+        }
+        if let Some(&r) = self.ctx.rp.lvl_cache.get(&e) {
+            return r;
+        }
+        let r = match self.ctx.read_expr(e) {
+            Local { id: crate::expr::FVarId::DbjLevel(l), binder_type, .. } => {
+                self.rp_max_level(binder_type).max(l + 1)
+            }
+            Local { binder_type, .. } => self.rp_max_level(binder_type),
+            App { fun, arg, .. } => self.rp_max_level(fun).max(self.rp_max_level(arg)),
+            Lambda { binder_type, body, .. } | Pi { binder_type, body, .. } => {
+                self.rp_max_level(binder_type).max(self.rp_max_level(body))
+            }
+            Let { binder_type, val, body, .. } => self
+                .rp_max_level(binder_type)
+                .max(self.rp_max_level(val))
+                .max(self.rp_max_level(body)),
+            Proj { structure, .. } => self.rp_max_level(structure),
+            _ => 0,
+        };
+        self.ctx.rp.lvl_cache.insert(e, r);
+        r
+    }
+
+    /// The de Bruijn level to give a binder opened inside the closure
+    /// `(e, env)`: one past every level reachable from it, so the variable
+    /// that names that binder cannot be confused with one already in scope.
+    fn rp_next_level(&mut self, e: ExprPtr<'t>, env: EnvId) -> u16 {
+        self.rp_max_level(e).max(self.rp_env_next_level(env))
+    }
+
     fn rp_push_entry(&mut self, env: EnvId, entry: Entry<'t>) -> EnvId {
         self.ctx.rp.ctrs[10] += 1;
         // The entry is part of the identity of every environment built on
@@ -293,6 +335,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return id;
         }
         let len = self.rp_env_len(env) + 1;
+        let next_level = {
+            let parent = self.rp_env_next_level(env);
+            match entry {
+                Entry::Neu(fv) => parent.max(self.rp_max_level(fv)),
+                Entry::Val(e, venv) => {
+                    parent.max(self.rp_max_level(e)).max(self.rp_env_next_level(venv))
+                }
+            }
+        };
         // Myers jump: if dist(parent) == dist(parent.jump), jump to parent.jump.jump
         let p = &self.ctx.rp.envs[env as usize];
         let jump = {
@@ -302,7 +353,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if d1 == d2 { j.jump } else { env }
         };
         let id = u32::try_from(self.ctx.rp.envs.len()).unwrap();
-        self.ctx.rp.envs.push(EnvNode { entry, parent: env, len, jump });
+        self.ctx.rp.envs.push(EnvNode { entry, parent: env, len, next_level, jump });
         self.ctx.rp.env_intern.insert(key, id);
         id
     }
@@ -341,9 +392,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// instead of being fresh every time. The binder type is part of the
     /// variable's identity, so a level shared by two binders of different
     /// types still gives two variables.
-    fn rp_fvar_at(&mut self, level: u32, ty: ExprPtr<'t>) -> ExprPtr<'t> {
+    fn rp_fvar_at(&mut self, level: u16, ty: ExprPtr<'t>) -> ExprPtr<'t> {
         let anon = self.ctx.anonymous();
-        let level = u16::try_from(level.min(u16::MAX as u32)).unwrap();
         self.ctx.remake_dbj_level(anon, BinderStyle::Default, ty, level)
     }
 
@@ -1399,7 +1449,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return false;
         }
         let d = self.rp_reify(sdc);
-        let level = self.rp_env_len(t.env).max(self.rp_env_len(s.env));
+        let level = self.rp_next_level(t.e, t.env).max(self.rp_next_level(s.e, s.env));
         let fv = self.rp_fvar_at(level, d);
         let tenv = self.rp_push_entry(t.env, Entry::Neu(fv));
         let senv = self.rp_push_entry(s.env, Entry::Neu(fv));
@@ -1633,7 +1683,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return false;
         };
         let d = self.rp_reify(Clo { e: dom, env: s_ty_w.head.env });
-        let level = self.rp_env_len(t.head.env).max(self.rp_env_len(s.head.env));
+        let level = self
+            .rp_next_level(t.head.e, t.head.env)
+            .max(self.rp_next_level(s.head.e, s.head.env))
+            .max(self.rp_max_level(d));
         let fv = self.rp_fvar_at(level, d);
         let Lambda { body: t_body, .. } = self.ctx.read_expr(t.head.e) else {
             return false;
@@ -1872,23 +1925,40 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     fn rp_infer_lambda(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
-        let Lambda { binder_name, binder_style, binder_type, body, .. } =
-            self.ctx.read_expr(c.e)
-        else {
-            unreachable!()
-        };
-        let d = self.rp_reify(Clo { e: binder_type, env: c.env });
-        if flag == Check {
-            let dty = self.rp_infer(Clo::of(d), flag);
-            self.rp_ensure_sort(dty);
+        // The whole run of binders is opened before the body is inferred, so
+        // the fvars standing for them are abstracted out of the inferred type
+        // in one traversal rather than one traversal per binder.
+        let mut env = c.env;
+        let mut e = c.e;
+        let mut binders = Vec::new();
+        let mut start = 0u16;
+        while let Lambda { binder_name, binder_style, binder_type, body, .. } =
+            self.ctx.read_expr(e)
+        {
+            let d = self.rp_reify(Clo { e: binder_type, env });
+            if flag == Check {
+                let dty = self.rp_infer(Clo::of(d), flag);
+                self.rp_ensure_sort(dty);
+            }
+            let level = self.rp_next_level(e, env).max(self.rp_max_level(d));
+            if binders.is_empty() {
+                start = level;
+            }
+            let fv = self.rp_fvar_at(level, d);
+            env = self.rp_push_entry(env, Entry::Neu(fv));
+            binders.push((binder_name, binder_style, d));
+            e = body;
         }
-        let level = self.rp_env_len(c.env);
-        let fv = self.rp_fvar_at(level, d);
-        let env2 = self.rp_push_entry(c.env, Entry::Neu(fv));
-        let bt = self.rp_infer(Clo { e: body, env: env2 }, flag);
+        let bt = self.rp_infer(Clo { e, env }, flag);
         let bt = self.rp_cheap_beta_reduce(bt);
-        let bt_abs = self.rp_abstract1(bt, fv, 0);
-        self.ctx.mk_pi(binder_name, binder_style, d, bt_abs)
+        let n = u16::try_from(binders.len()).unwrap();
+        let mut r = self.ctx.abstr_levels_at(bt, start, start + n);
+        for (i, (binder_name, binder_style, d)) in binders.into_iter().enumerate().rev() {
+            let i = u16::try_from(i).unwrap();
+            let d = self.ctx.abstr_levels_at(d, start, start + i);
+            r = self.ctx.mk_pi(binder_name, binder_style, d, r);
+        }
+        r
     }
 
     fn rp_infer_pi(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
@@ -1898,7 +1968,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let d = self.rp_reify(Clo { e: binder_type, env: c.env });
         let dty = self.rp_infer(Clo::of(d), flag);
         let u = self.rp_ensure_sort(dty);
-        let level = self.rp_env_len(c.env);
+        let level = self.rp_next_level(c.e, c.env).max(self.rp_max_level(d));
         let fv = self.rp_fvar_at(level, d);
         let env2 = self.rp_push_entry(c.env, Entry::Neu(fv));
         let bt = self.rp_infer(Clo { e: body, env: env2 }, flag);
@@ -1909,53 +1979,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.ctx.mk_sort(lvl)
     }
 
-    /// Abstract the single fvar `fv` in `e` to `Var(depth)`. Memoized.
-    fn rp_abstract1(&mut self, e: ExprPtr<'t>, fv: ExprPtr<'t>, depth: u16) -> ExprPtr<'t> {
-        if !self.ctx.has_fvars(e) {
-            return e;
-        }
-        let key = (e, fv, depth);
-        if let Some(&r) = self.ctx.rp.abs_cache.get(&key) {
-            return r;
-        }
-        let r = match self.ctx.read_expr(e) {
-            Local { .. } => {
-                if e == fv {
-                    self.ctx.mk_var(depth)
-                } else {
-                    e
-                }
-            }
-            App { fun, arg, .. } => {
-                let f2 = self.rp_abstract1(fun, fv, depth);
-                let x2 = self.rp_abstract1(arg, fv, depth);
-                self.ctx.mk_app(f2, x2)
-            }
-            Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                let d2 = self.rp_abstract1(binder_type, fv, depth);
-                let b2 = self.rp_abstract1(body, fv, depth + 1);
-                self.ctx.mk_lambda(binder_name, binder_style, d2, b2)
-            }
-            Pi { binder_name, binder_style, binder_type, body, .. } => {
-                let d2 = self.rp_abstract1(binder_type, fv, depth);
-                let b2 = self.rp_abstract1(body, fv, depth + 1);
-                self.ctx.mk_pi(binder_name, binder_style, d2, b2)
-            }
-            Let { binder_name, binder_type, val, body, nondep, .. } => {
-                let t2 = self.rp_abstract1(binder_type, fv, depth);
-                let v2 = self.rp_abstract1(val, fv, depth);
-                let b2 = self.rp_abstract1(body, fv, depth + 1);
-                self.ctx.mk_let(binder_name, t2, v2, b2, nondep)
-            }
-            Proj { ty_name, idx, structure, .. } => {
-                let x2 = self.rp_abstract1(structure, fv, depth);
-                self.ctx.mk_proj(ty_name, idx, x2)
-            }
-            _ => e,
-        };
-        self.ctx.rp.abs_cache.insert(key, r);
-        r
-    }
 
     fn rp_infer_let(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
         let Let { binder_type, val, body, .. } = self.ctx.read_expr(c.e) else {
