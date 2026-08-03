@@ -59,14 +59,6 @@ pub(crate) struct EnvNode<'t> {
     jump: EnvId,
 }
 
-/// What [`TypeChecker::rp_transform`] does at a leaf: substitute loose
-/// bvars from an environment, or abstract one local to a bvar.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Rw<'t> {
-    Reify(EnvId),
-    Abstract(ExprPtr<'t>),
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct Clo<'t> {
     pub e: ExprPtr<'t>,
@@ -107,7 +99,8 @@ pub(crate) struct RapierSt<'t> {
     whnf_cache: FxHashMap<Clo<'t>, SClo<'t>>,
     eq_pos: FxHashSet<(Clo<'t>, Clo<'t>)>,
     eq_neg: FxHashSet<(Clo<'t>, Clo<'t>)>,
-    transform_cache: FxHashMap<(ExprPtr<'t>, Rw<'t>, u16), ExprPtr<'t>>,
+    reify_go_cache: FxHashMap<(ExprPtr<'t>, EnvId, u16), ExprPtr<'t>>,
+    abs_cache: FxHashMap<(ExprPtr<'t>, ExprPtr<'t>, u16), ExprPtr<'t>>,
     /// keyed by the packed `(ae|aenv, be|benv, aoff|boff)` triple
     eq_mod_cache: FxHashMap<(u64, u64, u32), bool>,
     clo_fvar_cache: FxHashMap<(ExprPtr<'t>, EnvId, u16), bool>,
@@ -140,7 +133,8 @@ impl<'t> RapierSt<'t> {
             whnf_cache: new_fx_hash_map(),
             eq_pos: new_fx_hash_set(),
             eq_neg: new_fx_hash_set(),
-            transform_cache: new_fx_hash_map(),
+            reify_go_cache: new_fx_hash_map(),
+            abs_cache: new_fx_hash_map(),
             eq_mod_cache: new_fx_hash_map(),
             clo_fvar_cache: new_fx_hash_map(),
             g_unfold: FxHashMap::with_capacity_and_hasher(1 << 16, Default::default()),
@@ -176,7 +170,8 @@ impl<'t> RapierSt<'t> {
         rm(&mut self.whnf_cache);
         rs(&mut self.eq_pos);
         rs(&mut self.eq_neg);
-        rm(&mut self.transform_cache);
+        rm(&mut self.reify_go_cache);
+        rm(&mut self.abs_cache);
         rm(&mut self.eq_mod_cache);
         rm(&mut self.clo_fvar_cache);
     }
@@ -294,28 +289,20 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if c.env == ENV_NIL || self.lbr(c.e) == 0 {
             return c.e;
         }
-        self.rp_transform(c.e, Rw::Reify(c.env), 0)
+        self.rp_reify_go(c.env, 0, c.e)
     }
 
-    /// The memoized structural rewrite shared by substitution and
-    /// abstraction, after Lean's `Core.transform`: this owns the loose-bvar
-    /// offset discipline, the node reconstruction and the memo; a [`Rw`]
-    /// says only what to do at a leaf.
-    fn rp_transform(&mut self, e: ExprPtr<'t>, rw: Rw<'t>, offset: u16) -> ExprPtr<'t> {
+    fn rp_reify_go(&mut self, env: EnvId, offset: u16, e: ExprPtr<'t>) -> ExprPtr<'t> {
         let n = self.ctx.read_expr(e);
-        let skip = match rw {
-            Rw::Reify(_) => n.num_loose_bvars() <= offset,
-            Rw::Abstract(_) => !self.ctx.has_fvars(e),
-        };
-        if skip {
+        if n.num_loose_bvars() <= offset {
             return e;
         }
-        let key = (e, rw, offset);
-        if let Some(&r) = self.ctx.rp.transform_cache.get(&key) {
+        let memo_key = (e, env, offset);
+        if let Some(&r) = self.ctx.rp.reify_go_cache.get(&memo_key) {
             return r;
         }
-        let r = match (rw, n) {
-            (Rw::Reify(env), Var { dbj_idx, .. }) => match self.rp_lookup(env, dbj_idx - offset) {
+        let r = match n {
+            Var { dbj_idx, .. } => match self.rp_lookup(env, dbj_idx - offset) {
                 Entry::Neu(fv) => fv,
                 Entry::Val(e2, env2) => {
                     if env2 == ENV_NIL {
@@ -325,41 +312,34 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     }
                 }
             },
-            (Rw::Abstract(fv), Local { .. }) => {
-                if e == fv {
-                    self.ctx.mk_var(offset)
-                } else {
-                    e
-                }
-            }
-            (_, App { fun, arg, .. }) => {
-                let f2 = self.rp_transform(fun, rw, offset);
-                let x2 = self.rp_transform(arg, rw, offset);
+            App { fun, arg, .. } => {
+                let f2 = self.rp_reify_go(env, offset, fun);
+                let x2 = self.rp_reify_go(env, offset, arg);
                 self.ctx.mk_app(f2, x2)
             }
-            (_, Lambda { binder_name, binder_style, binder_type, body, .. }) => {
-                let d2 = self.rp_transform(binder_type, rw, offset);
-                let b2 = self.rp_transform(body, rw, offset + 1);
+            Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                let d2 = self.rp_reify_go(env, offset, binder_type);
+                let b2 = self.rp_reify_go(env, offset + 1, body);
                 self.ctx.mk_lambda(binder_name, binder_style, d2, b2)
             }
-            (_, Pi { binder_name, binder_style, binder_type, body, .. }) => {
-                let d2 = self.rp_transform(binder_type, rw, offset);
-                let b2 = self.rp_transform(body, rw, offset + 1);
+            Pi { binder_name, binder_style, binder_type, body, .. } => {
+                let d2 = self.rp_reify_go(env, offset, binder_type);
+                let b2 = self.rp_reify_go(env, offset + 1, body);
                 self.ctx.mk_pi(binder_name, binder_style, d2, b2)
             }
-            (_, Let { binder_name, binder_type, val, body, nondep, .. }) => {
-                let t2 = self.rp_transform(binder_type, rw, offset);
-                let v2 = self.rp_transform(val, rw, offset);
-                let b2 = self.rp_transform(body, rw, offset + 1);
+            Let { binder_name, binder_type, val, body, nondep, .. } => {
+                let t2 = self.rp_reify_go(env, offset, binder_type);
+                let v2 = self.rp_reify_go(env, offset, val);
+                let b2 = self.rp_reify_go(env, offset + 1, body);
                 self.ctx.mk_let(binder_name, t2, v2, b2, nondep)
             }
-            (_, Proj { ty_name, idx, structure, .. }) => {
-                let x2 = self.rp_transform(structure, rw, offset);
+            Proj { ty_name, idx, structure, .. } => {
+                let x2 = self.rp_reify_go(env, offset, structure);
                 self.ctx.mk_proj(ty_name, idx, x2)
             }
             _ => e,
         };
-        self.ctx.rp.transform_cache.insert(key, r);
+        self.ctx.rp.reify_go_cache.insert(memo_key, r);
         r
     }
 
@@ -1754,7 +1734,50 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Abstract the single fvar `fv` in `e` to `Var(depth)`. Memoized.
     fn rp_abstract1(&mut self, e: ExprPtr<'t>, fv: ExprPtr<'t>, depth: u16) -> ExprPtr<'t> {
-        self.rp_transform(e, Rw::Abstract(fv), depth)
+        if !self.ctx.has_fvars(e) {
+            return e;
+        }
+        let key = (e, fv, depth);
+        if let Some(&r) = self.ctx.rp.abs_cache.get(&key) {
+            return r;
+        }
+        let r = match self.ctx.read_expr(e) {
+            Local { .. } => {
+                if e == fv {
+                    self.ctx.mk_var(depth)
+                } else {
+                    e
+                }
+            }
+            App { fun, arg, .. } => {
+                let f2 = self.rp_abstract1(fun, fv, depth);
+                let x2 = self.rp_abstract1(arg, fv, depth);
+                self.ctx.mk_app(f2, x2)
+            }
+            Lambda { binder_name, binder_style, binder_type, body, .. } => {
+                let d2 = self.rp_abstract1(binder_type, fv, depth);
+                let b2 = self.rp_abstract1(body, fv, depth + 1);
+                self.ctx.mk_lambda(binder_name, binder_style, d2, b2)
+            }
+            Pi { binder_name, binder_style, binder_type, body, .. } => {
+                let d2 = self.rp_abstract1(binder_type, fv, depth);
+                let b2 = self.rp_abstract1(body, fv, depth + 1);
+                self.ctx.mk_pi(binder_name, binder_style, d2, b2)
+            }
+            Let { binder_name, binder_type, val, body, nondep, .. } => {
+                let t2 = self.rp_abstract1(binder_type, fv, depth);
+                let v2 = self.rp_abstract1(val, fv, depth);
+                let b2 = self.rp_abstract1(body, fv, depth + 1);
+                self.ctx.mk_let(binder_name, t2, v2, b2, nondep)
+            }
+            Proj { ty_name, idx, structure, .. } => {
+                let x2 = self.rp_abstract1(structure, fv, depth);
+                self.ctx.mk_proj(ty_name, idx, x2)
+            }
+            _ => e,
+        };
+        self.ctx.rp.abs_cache.insert(key, r);
+        r
     }
 
     fn rp_infer_let(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
