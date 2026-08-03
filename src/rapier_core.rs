@@ -13,6 +13,7 @@
 use crate::env::{Declar, ReducibilityHint};
 use crate::expr::{BinderStyle, Expr};
 use crate::tc::{InferFlag, TypeChecker};
+use crate::union_find::UnionFind;
 use crate::util::{
     nat_div, nat_gcd, nat_land, nat_lor, nat_mod, nat_sub, nat_xor, new_fx_hash_map,
     new_fx_hash_set, ExprPtr, FxHashMap, FxHashSet, LevelPtr, LevelsPtr, NamePtr,
@@ -97,7 +98,7 @@ pub(crate) struct RapierSt<'t> {
     infer_cache_check: FxHashMap<Clo<'t>, ExprPtr<'t>>,
     infer_cache_only: FxHashMap<Clo<'t>, ExprPtr<'t>>,
     whnf_cache: FxHashMap<Clo<'t>, SClo<'t>>,
-    eq_pos: FxHashSet<(Clo<'t>, Clo<'t>)>,
+    eq_pos: UnionFind<Clo<'t>>,
     eq_neg: FxHashSet<(Clo<'t>, Clo<'t>)>,
     reify_go_cache: Gen2<(ExprPtr<'t>, EnvId, u16), ExprPtr<'t>>,
     abs_cache: FxHashMap<(ExprPtr<'t>, ExprPtr<'t>, u16), ExprPtr<'t>>,
@@ -114,13 +115,32 @@ pub(crate) struct RapierSt<'t> {
     g_unfold: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
     /// const expr -> its level-instantiated type
     g_inst_ty: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
-    g_eq_pos: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
+    g_eq_pos: UnionFind<ExprPtr<'t>>,
     g_eq_neg: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
 
     /// diagnostic counters: [infer, whnf_core, whnf, def_eq, whnf_hit,
-    /// whnf_miss, g_whnf_hit, g_whnf_miss, unfold_hit, unfold_miss,
+    /// whnf_miss, whnf_core_hit, whnf_core_miss, unfold_hit, unfold_miss,
     /// push_entry, eq_mod]
-    pub(crate) ctrs: [u64; 12],
+    pub(crate) ctrs: [u64; 18],
+}
+
+/// Totals over all declarations, printed at exit when `RAPIER_CTRS` is set.
+pub static G_CTRS: [std::sync::atomic::AtomicU64; 18] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 18];
+
+pub fn ctrs_report() -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    const NAMES: [&str; 18] = [
+        "infer", "whnf_core", "whnf", "def_eq", "whnf_hit", "whnf_miss",
+        "deq_hit", "deq_miss", "unfold_hit", "unfold_miss",
+        "push_entry", "eq_mod", "eqm_hit", "eqm_miss", "eqm_fast", "eqm_nomemo",
+        "inf_hit", "inf_miss",
+    ];
+    let mut out = String::new();
+    for (n, c) in NAMES.iter().zip(G_CTRS.iter()) {
+        out.push_str(&format!("{}={} ", n, c.load(Relaxed)));
+    }
+    out
 }
 
     /// Ceiling on a single memo table within one declaration. The tables are
@@ -137,7 +157,7 @@ impl<'t> RapierSt<'t> {
             infer_cache_check: new_fx_hash_map(),
             infer_cache_only: new_fx_hash_map(),
             whnf_cache: new_fx_hash_map(),
-            eq_pos: new_fx_hash_set(),
+            eq_pos: UnionFind::new(),
             eq_neg: new_fx_hash_set(),
             reify_go_cache: Gen2::new(),
             abs_cache: new_fx_hash_map(),
@@ -145,9 +165,18 @@ impl<'t> RapierSt<'t> {
             clo_fvar_cache: Gen2::new(),
             g_unfold: FxHashMap::with_capacity_and_hasher(1 << 16, Default::default()),
             g_inst_ty: FxHashMap::with_capacity_and_hasher(1 << 18, Default::default()),
-            g_eq_pos: FxHashSet::with_capacity_and_hasher(1 << 16, Default::default()),
+            g_eq_pos: UnionFind::new(),
             g_eq_neg: FxHashSet::with_capacity_and_hasher(1 << 16, Default::default()),
-            ctrs: [0; 12],
+            ctrs: [0; 18],
+        }
+    }
+
+    /// Accumulate this context's counters into the process-wide totals.
+    pub(crate) fn flush_ctrs(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        for (g, c) in G_CTRS.iter().zip(self.ctrs.iter_mut()) {
+            g.fetch_add(*c, Relaxed);
+            *c = 0;
         }
     }
 
@@ -174,7 +203,7 @@ impl<'t> RapierSt<'t> {
         rm(&mut self.infer_cache_check);
         rm(&mut self.infer_cache_only);
         rm(&mut self.whnf_cache);
-        rs(&mut self.eq_pos);
+        self.eq_pos.clear();
         rs(&mut self.eq_neg);
         self.reify_go_cache.reset_decl();
         rm(&mut self.abs_cache);
@@ -245,6 +274,20 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn rp_push_entry(&mut self, env: EnvId, entry: Entry<'t>) -> EnvId {
         self.ctx.rp.ctrs[10] += 1;
+        // The entry is part of the identity of every environment built on
+        // top of it, so it enters in normal form: a value that reads nothing
+        // from its own environment carries none, and a value that is a
+        // variable is replaced by what that variable stands for. Without
+        // this, one binding reached along two paths yields two environments
+        // and splits every cache keyed on them.
+        let entry = match entry {
+            Entry::Val(e, venv) if venv != ENV_NIL => {
+                match self.rp_norm_clo(Clo { e, env: venv }) {
+                    Clo { e, env } => Entry::Val(e, env),
+                }
+            }
+            e => e,
+        };
         let key = pack_entry_key(env, entry);
         if let Some(&id) = self.ctx.rp.env_intern.get(&key) {
             return id;
@@ -291,9 +334,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn rp_fresh_fvar(&mut self, ty: ExprPtr<'t>) -> ExprPtr<'t> {
+    /// The free variable standing for a binder opened over an environment of
+    /// `level` entries. Naming it by that level, rather than by a counter,
+    /// makes two openings of the same binder produce the same variable, so
+    /// the closures, environments and cache keys built on top of it coincide
+    /// instead of being fresh every time. The binder type is part of the
+    /// variable's identity, so a level shared by two binders of different
+    /// types still gives two variables.
+    fn rp_fvar_at(&mut self, level: u32, ty: ExprPtr<'t>) -> ExprPtr<'t> {
         let anon = self.ctx.anonymous();
-        self.ctx.mk_unique(anon, BinderStyle::Default, ty)
+        let level = u16::try_from(level.min(u16::MAX as u32)).unwrap();
+        self.ctx.remake_dbj_level(anon, BinderStyle::Default, ty, level)
     }
 
     fn rp_fvar_type(&self, fv: ExprPtr<'t>) -> ExprPtr<'t> {
@@ -439,13 +490,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         // fast paths
         let albr = an.num_loose_bvars();
-        if albr <= aoff && bn.num_loose_bvars() <= boff && aoff == 0 && boff == 0 {
+        if albr <= aoff && bn.num_loose_bvars() <= boff && aoff == boff {
+            self.ctx.rp.ctrs[14] += 1;
             return ae == be;
         }
         if ae == be && aenv == benv && aoff == boff {
+            self.ctx.rp.ctrs[14] += 1;
             return true;
         }
         if ae == be && albr <= aoff.min(boff) {
+            self.ctx.rp.ctrs[14] += 1;
             return true;
         }
         // Consulted from either call order, so the test must not depend on
@@ -471,8 +525,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         };
         if composite {
             if let Some(r) = self.ctx.rp.eq_mod_cache.get(&memo_key) {
+                self.ctx.rp.ctrs[12] += 1;
                 return r;
             }
+            self.ctx.rp.ctrs[13] += 1;
+        } else {
+            self.ctx.rp.ctrs[15] += 1;
         }
         let r = match (an, bn) {
             (Var { dbj_idx: i, .. }, Var { dbj_idx: j, .. }) => i == j,
@@ -575,8 +633,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return r;
         }
         self.ctx.rp.ctrs[5] += 1;
-        let s = self.rp_mk_sclo(c);
-        let r = self.rp_whnf(s);
+        self.ctx.rp.ctrs[2] += 1;
+        let t = self.rp_whnf_core_clo(c);
+        let r = self.rp_whnf_loop(t);
         // whnf_cache is never evicted: dropping a weak-head normal form makes
         // the checker redo whole reduction sequences, which on nested redexes
         // is the difference between linear and exponential. Measured on the
@@ -588,7 +647,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     pub(crate) fn rp_whnf(&mut self, s: SClo<'t>) -> SClo<'t> {
         self.ctx.rp.ctrs[2] += 1;
-        let mut t = self.rp_whnf_core(s);
+        let t = self.rp_whnf_core(s);
+        self.rp_whnf_loop(t)
+    }
+
+    fn rp_whnf_loop(&mut self, mut t: SClo<'t>) -> SClo<'t> {
         for _ in 0..100_000u32 {
             if let Some(t2) = self.rp_reduce_nat(&t) {
                 t = self.rp_whnf_core(t2);
@@ -603,6 +666,19 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     pub(crate) fn rp_whnf_core(&mut self, s: SClo<'t>) -> SClo<'t> {
+        self.rp_whnf_core_ext(s, false, false)
+    }
+
+    /// `whnf_core` entered at a closure: the head and spine come from `c.e`,
+    /// and a head already in weak head normal form needs no spine.
+    fn rp_whnf_core_clo(&mut self, c: Clo<'t>) -> SClo<'t> {
+        let c = self.rp_norm_clo(c);
+        match self.ctx.read_expr(c.e) {
+            NatLit { .. } | StringLit { .. } | Sort { .. } | Pi { .. } | Lambda { .. }
+            | Local { .. } => return SClo { head: c, spine: Vec::new() },
+            _ => {}
+        }
+        let s = self.rp_mk_sclo(c);
         self.rp_whnf_core_ext(s, false, false)
     }
 
@@ -1111,40 +1187,52 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return true;
         }
         let (tk, sk) = (self.rp_norm_clo(t), self.rp_norm_clo(s));
+        if self.ctx.rp.eq_pos.known_eq(&tk, &sk) {
+            self.ctx.rp.ctrs[6] += 1;
+            return true;
+        }
         if let (Some(a), Some(b)) = (self.rp_global_key(tk), self.rp_global_key(sk)) {
             let gpk = if a.get_hash() <= b.get_hash() { (a, b) } else { (b, a) };
-            if self.ctx.rp.g_eq_pos.contains(&gpk) {
+            if self.ctx.rp.g_eq_pos.known_eq(&a, &b) {
+                self.ctx.rp.ctrs[6] += 1;
                 return true;
             }
             if self.ctx.rp.g_eq_neg.contains(&gpk) {
+                self.ctx.rp.ctrs[6] += 1;
                 return false;
             }
-            let ts = self.rp_mk_sclo(t);
-            let ss = self.rp_mk_sclo(s);
-            let r = self.rp_is_def_eq_s(ts, ss);
+            self.ctx.rp.ctrs[7] += 1;
+            let r = self.rp_is_def_eq_clo(tk, sk);
             if r {
-                self.ctx.rp.g_eq_pos.insert(gpk);
+                self.ctx.rp.g_eq_pos.union(a, b);
             } else {
                 self.ctx.rp.g_eq_neg.insert(gpk);
             }
             return r;
         }
         let pk = if clo_le(&tk, &sk) { (tk, sk) } else { (sk, tk) };
-        if self.ctx.rp.eq_pos.contains(&pk) {
-            return true;
-        }
         if self.ctx.rp.eq_neg.contains(&pk) {
+            self.ctx.rp.ctrs[6] += 1;
             return false;
         }
-        let ts = self.rp_mk_sclo(t);
-        let ss = self.rp_mk_sclo(s);
-        let r = self.rp_is_def_eq_s(ts, ss);
+        self.ctx.rp.ctrs[7] += 1;
+        let r = self.rp_is_def_eq_clo(tk, sk);
         if r {
-            self.ctx.rp.eq_pos.insert(pk);
+            self.ctx.rp.eq_pos.union(tk, sk);
         } else {
             self.ctx.rp.eq_neg.insert(pk);
         }
         r
+    }
+
+    /// Both sides enter `whnf_core` at a closure key, so the memo applies.
+    fn rp_is_def_eq_clo(&mut self, t: Clo<'t>, s: Clo<'t>) -> bool {
+        let tn = self.rp_whnf_core_clo(t);
+        let sn = self.rp_whnf_core_clo(s);
+        if self.rp_s_quick_eq(&tn, &sn) {
+            return true;
+        }
+        self.rp_is_def_eq_s_core(tn, sn)
     }
 
     fn rp_is_def_eq_s(&mut self, t: SClo<'t>, s: SClo<'t>) -> bool {
@@ -1311,7 +1399,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return false;
         }
         let d = self.rp_reify(sdc);
-        let fv = self.rp_fresh_fvar(d);
+        let level = self.rp_env_len(t.env).max(self.rp_env_len(s.env));
+        let fv = self.rp_fvar_at(level, d);
         let tenv = self.rp_push_entry(t.env, Entry::Neu(fv));
         let senv = self.rp_push_entry(s.env, Entry::Neu(fv));
         self.rp_def_eq_binding(Clo { e: tb, env: tenv }, Clo { e: sb, env: senv })
@@ -1544,7 +1633,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return false;
         };
         let d = self.rp_reify(Clo { e: dom, env: s_ty_w.head.env });
-        let fv = self.rp_fresh_fvar(d);
+        let level = self.rp_env_len(t.head.env).max(self.rp_env_len(s.head.env));
+        let fv = self.rp_fvar_at(level, d);
         let Lambda { body: t_body, .. } = self.ctx.read_expr(t.head.e) else {
             return false;
         };
@@ -1709,8 +1799,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     InferOnly => self.ctx.rp.infer_cache_only.get(&key),
                 };
                 if let Some(&r) = cached {
+                    self.ctx.rp.ctrs[16] += 1;
                     return r;
                 }
+                self.ctx.rp.ctrs[17] += 1;
                 let r = match n {
                     Lambda { .. } => self.rp_infer_lambda(c, flag),
                     Pi { .. } => self.rp_infer_pi(c, flag),
@@ -1790,7 +1882,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let dty = self.rp_infer(Clo::of(d), flag);
             self.rp_ensure_sort(dty);
         }
-        let fv = self.rp_fresh_fvar(d);
+        let level = self.rp_env_len(c.env);
+        let fv = self.rp_fvar_at(level, d);
         let env2 = self.rp_push_entry(c.env, Entry::Neu(fv));
         let bt = self.rp_infer(Clo { e: body, env: env2 }, flag);
         let bt = self.rp_cheap_beta_reduce(bt);
@@ -1805,7 +1898,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let d = self.rp_reify(Clo { e: binder_type, env: c.env });
         let dty = self.rp_infer(Clo::of(d), flag);
         let u = self.rp_ensure_sort(dty);
-        let fv = self.rp_fresh_fvar(d);
+        let level = self.rp_env_len(c.env);
+        let fv = self.rp_fvar_at(level, d);
         let env2 = self.rp_push_entry(c.env, Entry::Neu(fv));
         let bt = self.rp_infer(Clo { e: body, env: env2 }, flag);
         let s = self.rp_ensure_sort(bt);

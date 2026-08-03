@@ -50,7 +50,10 @@ impl<'p> ExportFile<'p> {
     /// check interns is released when `d` is done. Terms parsed from the
     /// export file live in the shared dag and are unaffected.
     pub fn check_declar(&self, d: &Declar<'p>) {
-        self.with_ctx(|ctx| self.check_declar_in(ctx, d))
+        self.with_ctx(|ctx| {
+            self.check_declar_in(ctx, d);
+            ctx.rp.flush_ctrs();
+        })
     }
 
     /// Check a declaration in an existing context.
@@ -89,8 +92,32 @@ impl<'p> ExportFile<'p> {
             std::thread::Builder::new()
                 .stack_size(crate::STACK_SIZE)
                 .spawn_scoped(sco, || {
-                    for declar in self.declars.values() {
-                        self.check_declar(declar);
+                    let report = std::env::var("RAPIER_DECLTIME").is_ok();
+                    let skip: usize = std::env::var("RAPIER_SKIP_UNTIL")
+                        .ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                    let stop_after: Option<usize> = std::env::var("RAPIER_STOP_AFTER")
+                        .ok().and_then(|v| v.parse().ok());
+                    for (i, declar) in self.declars.values().enumerate() {
+                        if i < skip {
+                            continue
+                        }
+                        if let Some(stop) = stop_after {
+                            if i > stop {
+                                break
+                            }
+                        }
+                        if report {
+                            let t0 = std::time::Instant::now();
+                            self.check_declar(declar);
+                            let us = t0.elapsed().as_micros();
+                            if us >= 1000 {
+                                self.with_ctx(|ctx| {
+                                    eprintln!("DECL\t{}\t{}\t{:?}", i, us, ctx.debug_print(declar.info().name))
+                                });
+                            }
+                        } else {
+                            self.check_declar(declar);
+                        }
                     }
                 })
                 .unwrap()
