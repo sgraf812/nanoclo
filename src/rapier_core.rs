@@ -123,6 +123,12 @@ pub(crate) struct RapierSt<'t> {
     pub(crate) ctrs: [u64; 12],
 }
 
+    /// Ceiling on a single memo table within one declaration. The tables are
+/// cleared between declarations, but a large declaration can grow one
+/// without bound; peak memory is set by the largest declaration in the
+/// export. Dropping a memo costs recomputation, never correctness.
+
+
 impl<'t> RapierSt<'t> {
     pub(crate) fn new() -> Self {
         RapierSt {
@@ -390,15 +396,27 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if ae == be && albr <= aoff.min(boff) {
             return true;
         }
-        let composite = matches!(
-            an,
-            App { .. } | Lambda { .. } | Pi { .. } | Let { .. } | Proj { .. }
-        );
-        let memo_key = (
-            (aenv as u64) << 32 | ae.get_hash(),
-            (benv as u64) << 32 | be.get_hash(),
-            (aoff as u32) << 16 | boff as u32,
-        );
+        // Consulted from either call order, so the test must not depend on
+        // which side is which: the key is canonical in the two sides.
+        let is_composite = |n: &Expr<'t>| {
+            matches!(n, App { .. } | Lambda { .. } | Pi { .. } | Let { .. } | Proj { .. })
+        };
+        let composite = is_composite(&an) || is_composite(&bn);
+        // The key is the six arguments packed losslessly: an environment id
+        // and an offset are only part of the question when the expression
+        // still has loose bvars at that offset, so a side that is closed
+        // there keys as (e, NIL, 0). eq_mod is symmetric, so the two sides
+        // are ordered canonically and each question is stored once.
+        let blbr = bn.num_loose_bvars();
+        let (ka_env, ka_off) = if albr <= aoff { (ENV_NIL, 0u16) } else { (aenv, aoff) };
+        let (kb_env, kb_off) = if blbr <= boff { (ENV_NIL, 0u16) } else { (benv, boff) };
+        let ka = (ka_env as u64) << 32 | ae.get_hash();
+        let kb = (kb_env as u64) << 32 | be.get_hash();
+        let memo_key = if ka <= kb {
+            (ka, kb, (ka_off as u32) << 16 | kb_off as u32)
+        } else {
+            (kb, ka, (kb_off as u32) << 16 | ka_off as u32)
+        };
         if composite {
             if let Some(&r) = self.ctx.rp.eq_mod_cache.get(&memo_key) {
                 return r;
@@ -484,7 +502,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         SClo { head: Clo { e, env: c.env }, spine }
     }
 
+    /// whnf recurses through reduce_nat and nat_lit back into itself, so the
+    /// depth follows the term's reduction rather than its size. Grow the
+    /// stack on demand here rather than sizing a thread stack for the worst
+    /// input.
     pub(crate) fn rp_whnf_clo(&mut self, c: Clo<'t>) -> SClo<'t> {
+        stacker::maybe_grow(256 * 1024, 16 * 1024 * 1024, move || self.rp_whnf_clo_inner(c))
+    }
+
+    fn rp_whnf_clo_inner(&mut self, c: Clo<'t>) -> SClo<'t> {
         let c = self.rp_norm_clo(c);
         match self.ctx.read_expr(c.e) {
             NatLit { .. } | StringLit { .. } | Sort { .. } | Pi { .. } | Lambda { .. }

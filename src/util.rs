@@ -725,6 +725,23 @@ impl<'a> LeanDag<'a> {
         out
     }
 
+    /// Empty the dag back to its freshly constructed state, keeping the
+    /// allocations. Checking a declaration builds terms here and none of
+    /// them outlive it, so the driver reuses one scratch dag rather than
+    /// constructing and dropping one per declaration.
+    pub fn clear_keeping_capacity(&mut self) {
+        self.names.clear();
+        self.levels.clear();
+        self.exprs.clear();
+        self.uparams.clear();
+        self.strings.clear();
+        if let Some(b) = self.bignums.as_mut() {
+            b.clear();
+        }
+        let _ = self.names.insert(Name::Anon);
+        let _ = self.levels.insert(Level::Zero);
+    }
+
     /// Used for constructing the name cache;
     pub(crate) fn anonymous(&self) -> NamePtr<'a> {
         debug_assert_eq!(self.names.get_index(0).copied().unwrap(), Name::Anon);
