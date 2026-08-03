@@ -4,7 +4,6 @@ use crate::level::Level;
 use crate::name::Name;
 use crate::pretty_printer::{PpOptions, PrettyPrinter};
 use crate::tc::TypeChecker;
-use crate::union_find::UnionFind;
 use crate::unique_hasher::UniqueHasher;
 use indexmap::{IndexMap, IndexSet};
 use num_bigint::BigUint;
@@ -31,7 +30,6 @@ pub(crate) type FxIndexSet<A> = IndexSet<A, BuildHasherDefault<FxHasher>>;
 pub(crate) type FxIndexMap<K, V> = IndexMap<K, V, BuildHasherDefault<FxHasher>>;
 pub(crate) type FxHashMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 pub(crate) type FxHashSet<K> = HashSet<K, BuildHasherDefault<FxHasher>>;
-pub(crate) type UniqueHashMap<K, V> = HashMap<K, V, BuildHasherDefault<UniqueHasher>>;
 
 /// An integer pointer to a kernel item, which can be in either the export file's
 /// persistent dag, or the type checking context's temporary dag. The integer pointer
@@ -97,7 +95,6 @@ pub(crate) fn new_fx_hash_set<K>() -> FxHashSet<K> { FxHashSet::with_hasher(Defa
 pub(crate) fn new_fx_index_set<K>() -> FxIndexSet<K> { FxIndexSet::with_hasher(Default::default()) }
 pub(crate) fn new_unique_index_set<K>() -> UniqueIndexSet<K> { UniqueIndexSet::with_hasher(Default::default()) }
 
-pub(crate) fn new_unique_hash_map<K, V>() -> UniqueHashMap<K, V> { UniqueHashMap::with_hasher(Default::default()) }
 
 /// Convenience macro for creating a 64 bit hash.
 #[macro_export]
@@ -160,10 +157,14 @@ pub(crate) fn nat_xor(x: &BigUint, y: &BigUint) -> BigUint {
 
 
 
+/// Used by `src/tests/natlit.rs`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn nat_shl(x: BigUint, y: BigUint) -> BigUint {
     x * BigUint::from(2u8).pow(y)
 }
 
+/// Used by `src/tests/natlit.rs`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn nat_shr(x: BigUint, y: BigUint) -> BigUint {
     x / BigUint::from(2u8).pow(y)
 }
@@ -274,7 +275,6 @@ pub struct TcCtx<'t, 'p> {
     pub(crate) unique_counter: u32,
     /// A cache for instantiation, free variable abstraction, and level substitution
     pub(crate) expr_cache: ExprCache<'t>,
-    pub(crate) eager_mode: bool,
     /// The rapier delayed-instantiation core's state (interned environments,
     /// per-declaration caches, and per-thread global caches); see
     /// `rapier_core.rs`. Lives here so that it can persist for the lifetime
@@ -290,7 +290,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             dbj_level_counter: 0u16,
             unique_counter: 0u32,
             expr_cache: ExprCache::new(),
-            eager_mode: false,
             rp: crate::rapier_core::RapierSt::new(),
         }
     }
@@ -769,7 +768,6 @@ impl<'a> LeanDag<'a> {
     /// them since we need to retrieve them quite frequently.
     pub(crate) fn mk_name_cache(&self) -> NameCache<'a> {
         NameCache {
-            eager_reduce: self.find_name("eagerReduce"),
             quot: self.find_name("Quot"),
             quot_mk: self.find_name("Quot.mk"),
             quot_lift: self.find_name("Quot.lift"),
@@ -811,7 +809,6 @@ impl<'a> LeanDag<'a> {
 /// is present in the export file, otherwise they're `None`.
 #[derive(Debug, Clone, Copy)]
 pub struct NameCache<'p> {
-    pub(crate) eager_reduce: Option<NamePtr<'p>>,
     pub(crate) quot: Option<NamePtr<'p>>,
     pub(crate) quot_mk: Option<NamePtr<'p>>,
     pub(crate) quot_lift: Option<NamePtr<'p>>,
@@ -848,41 +845,6 @@ pub struct NameCache<'p> {
     pub(crate) list_cons: Option<NamePtr<'p>>,
 }
 
-pub(crate) struct TcCache<'t> {
-    pub(crate) infer_cache_check: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
-    pub(crate) infer_cache_no_check: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
-    pub(crate) whnf_cache: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
-    pub(crate) whnf_no_unfolding_cache: UniqueHashMap<ExprPtr<'t>, ExprPtr<'t>>,
-    pub(crate) eq_cache: UnionFind<ExprPtr<'t>>,
-    /// A cache of congruence failures during the lazy delta step procedure.
-    pub(crate) failure_cache: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
-    /// Strong reduction is not used during type-checking, this is more of a library/inspection feature.
-    pub(crate) strong_cache: UniqueHashMap<(ExprPtr<'t>, bool, bool), ExprPtr<'t>>,
-}
-
-impl<'t> TcCache<'t> {
-    pub(crate) fn new() -> Self {
-        Self {
-            infer_cache_check: new_unique_hash_map(),
-            infer_cache_no_check: new_unique_hash_map(),
-            whnf_cache: new_unique_hash_map(),
-            whnf_no_unfolding_cache: new_unique_hash_map(),
-            eq_cache: UnionFind::new(),
-            failure_cache: new_fx_hash_set(),
-            strong_cache: new_unique_hash_map(),
-        }
-    }
-
-    pub(crate) fn clear(&mut self) {
-        self.infer_cache_check.clear();
-        self.infer_cache_no_check.clear();
-        self.whnf_cache.clear();
-        self.whnf_no_unfolding_cache.clear();
-        self.eq_cache.clear();
-        self.failure_cache.clear();
-        self.strong_cache.clear();
-    }
-}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {

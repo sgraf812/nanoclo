@@ -372,7 +372,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// than the mutuals, because we need to determine the target for the block codom
     /// and some other stuff.
     fn check_inductive_spec_0th(&mut self, uparams: LevelsPtr<'t>, st: &mut InductiveCheckState<'t>) {
-        self.tc_cache.clear();
         let (ind_name, mut ind_ty_cursor) = st.all_inductives_incl_specialized.get(0).map(|x| (x.name, x.ty)).unwrap();
         ind_ty_cursor = self.whnf(ind_ty_cursor);
         let mut indices_locals = Vec::new();
@@ -382,7 +381,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let local_ = st.local_params[i];
                 match self.ctx.read_expr(local_) {
                     Local { binder_type: t2, .. } => {
-                        self.tc_cache.clear();
                         self.assert_def_eq(binder_type, t2);
                     }
                     _ => panic!(),
@@ -411,7 +409,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Check the rest of the types in a mutual block, ensuring they agree with the base type.
     fn check_inductive_specs_mutual1(&mut self, st: &mut InductiveCheckState<'t>, ind: IndTyHeader<'t>) {
-        self.tc_cache.clear();
         let mut ind_ty_cursor = self.whnf(ind.ty);
         let mut indices_locals = Vec::new();
         let mut i = 0;
@@ -811,7 +808,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         parent_ind_name: NamePtr<'t>,
         mut ctor_type_cursor: ExprPtr<'t>,
     ) {
-        self.tc_cache.clear();
         for i in 0..st.local_params.len() {
             let local_param = st.local_params[i];
             match self.ctx.read_expr_pair(ctor_type_cursor, local_param) {
@@ -862,7 +858,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     // | mk (m : Nat) (n : Nat) : MyTypeSmall A n
     //```
     fn large_elim_test_aux(&mut self, mut ctor_type_cursor: ExprPtr<'t>, mut rem_params: usize) -> bool {
-        self.tc_cache.clear();
         let mut non_prop_ctor_telescope_elems = Vec::new();
         loop {
             match self.ctx.read_expr(ctor_type_cursor) {
@@ -1036,7 +1031,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     ) -> (ExprPtr<'t>, Vec<ExprPtr<'t>>, Vec<ExprPtr<'t>>) {
         let mut all_args = Vec::new();
         let mut rec_args = Vec::new();
-        self.tc_cache.clear();
         for i in 0..st.local_params.len() {
             match (self.ctx.read_expr(ctor_type_cursor), rem_params[i]) {
                 (Pi { body, .. }, local_param) => {
@@ -1064,7 +1058,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     ) -> Vec<ExprPtr<'t>> {
         let mut out = Vec::new();
         for (i, rec_arg) in rec_args.iter().copied().enumerate() {
-            self.tc_cache.clear();
             let u_i_ty = self.infer_then_whnf(rec_arg, crate::tc::InferFlag::InferOnly);
             let (arg_ty, xs) = self.handle_rec_args_aux(u_i_ty);
             let (ind_ty_idx, applied_indices) = self.get_i_indices(st, arg_ty);
@@ -1134,7 +1127,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let rec_str_ptr = self.ctx.alloc_string(std::borrow::Cow::Borrowed("rec"));
         let flat_mapped_minors = st.minors.iter().flat_map(|v| v.iter().copied()).collect::<Vec<ExprPtr>>();
         for rec_ctor_arg in rec_ctor_args.iter().copied() {
-            self.tc_cache.clear();
             let u_i_ty = self.infer_then_whnf(rec_ctor_arg, InferFlag::InferOnly);
             let (u_i_ty, xs) = self.handle_rec_args_aux(u_i_ty);
             let (it_idx, applied_indices) = self.get_i_indices(st, u_i_ty);
@@ -1202,7 +1194,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 (Some(Declar::Inductive(old)), Some(Declar::Inductive(new))) => {
                     assert!(old.aux_data_ck(new));
                     debug_assert!(!std::ptr::eq(old, new));
-                    self.tc_cache.clear();
                     self.assert_def_eq(old.info.ty, new.info.ty);
                 }
                 _ => panic!(),
@@ -1218,7 +1209,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     (Some(Declar::Constructor(old)), Some(Declar::Constructor(new))) => {
                         assert!(old.aux_data_ck(new));
                         debug_assert!(!std::ptr::eq(old, new));
-                        self.tc_cache.clear();
                         self.assert_def_eq(old.info.ty, new.info.ty);
                     }
                     _ => panic!(),
@@ -1238,7 +1228,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // Should be structurally != because they come from different envs.
         assert_ne!(imported_rr, constructed_rr);
         assert!(!st.is_nested());
-        self.tc_cache.clear();
         assert_eq!(imported_rr.ctor_name, constructed_rr.ctor_name);
         assert_eq!(imported_rr.ctor_telescope_size_wo_params, constructed_rr.ctor_telescope_size_wo_params);
         let rr_made_val = self.ctx.subst_expr_levels(constructed_rr.val, st.rec_uparams.unwrap(), old);
@@ -1253,7 +1242,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     Some(old @ Declar::Recursor(old_r @ RecursorData { rec_rules: old_rec_rules, .. })),
                     new @ Declar::Recursor(new_r @ RecursorData { rec_rules: new_rec_rules, .. })
                 ) => {
-                    self.tc_cache.clear();
                     assert!(old_r.aux_data_ck(new_r));
                     assert!(!std::ptr::eq(old, new));
                     // Should be structurally != because they come from different envs.
@@ -1612,7 +1600,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         match self.env.get_old_declar(&resolved_rec_name) {
             Some(Declar::Recursor(original @ RecursorData { .. })) => {
                 assert!(original.aux_data_ck(&restored));
-                self.tc_cache.clear();
                 self.assert_def_eq(original.info.ty, restored.info.ty);
                 // have to do the rec rules as well.
                 assert_eq!(original.rec_rules.len(), restored.rec_rules.len());
@@ -1620,7 +1607,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     let old = original.rec_rules[i];
                     let new = restored.rec_rules[i];
                     assert_eq!(old.ctor_name, new.ctor_name);
-                    self.tc_cache.clear();
                     self.assert_def_eq(old.val, new.val);
                 }
             }
@@ -1664,7 +1650,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let new_ctor @ ConstructorData { .. } = self.env.get_constructor(&old_ctor.info.name).unwrap();
         assert!(old_ctor.aux_data_ck(&new_ctor));
         let new_ty = self.restore_e(st, new_ctor.info.ty, rec_name_map);
-        self.tc_cache.clear();
         self.assert_def_eq(old_ctor.info.ty, new_ty);
     }
 
@@ -1683,7 +1668,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 (Some(Declar::Inductive(old)), Some(Declar::Inductive(new))) => {
                     assert!(old.aux_data_ck(new));
                     debug_assert!(!std::ptr::eq(old, new));
-                    self.tc_cache.clear();
                     self.assert_def_eq(old.info.ty, new.info.ty);
                 }
                 _ => panic!(),
