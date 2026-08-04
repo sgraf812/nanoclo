@@ -189,7 +189,7 @@ pub struct ExprCache<'t> {
     /// cache the sequence of free variables.
     pub(crate) abstr_cache: FxHashMap<(ExprPtr<'t>, u16), ExprPtr<'t>>,
     /// A cache for (expr, starting deBruijn level, current deBruijn level)
-    pub(crate) abstr_cache_levels: FxHashMap<(ExprPtr<'t>, u16, u16), ExprPtr<'t>>,
+    pub(crate) abstr_cache_levels: FxHashMap<(ExprPtr<'t>, u32, u32), ExprPtr<'t>>,
 }
 
 impl<'t> ExprCache<'t> {
@@ -269,7 +269,7 @@ pub struct TcCtx<'t, 'p> {
     /// Non-monotonic counter showing the current deBruijn level (which is also the number
     /// of binders that are open above us). When a binder is opened and traversed under, this
     /// counter is incremented. When the binder is closed again, this counter is decremented.
-    pub(crate) dbj_level_counter: u16,
+    pub(crate) dbj_level_counter: u32,
     /// Monotonically increasing counter for unique free variables. Any two free variables created
     /// with the `mk_unique` constructor are unique within their `(ExportFile, TcCtx)` pair.
     pub(crate) unique_counter: u32,
@@ -287,7 +287,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         Self { 
             export_file,
             dag: tdag,
-            dbj_level_counter: 0u16,
+            dbj_level_counter: 0u32,
             unique_counter: 0u32,
             expr_cache: ExprCache::new(),
             rp: crate::rapier_core::RapierSt::new(),
@@ -661,7 +661,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         binder_name: NamePtr<'t>,
         binder_style: BinderStyle,
         binder_type: ExprPtr<'t>,
-        level: u16,
+        level: u32,
     ) -> ExprPtr<'t> {
         let id = FVarId::DbjLevel(level);
         let hash = hash64!(crate::expr::LOCAL_HASH, binder_name, binder_style, binder_type, id);
@@ -688,8 +688,11 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     /// variable. This is the same thing as asking "if this element is the `nth` element
     /// when counting from the front of a sequence of length `m`, what is its position
     /// when counting from the back?"
-    pub(crate) fn fvar_to_bvar(&mut self, num_open_binders: u16, dbj_level: u16) -> ExprPtr<'t> {
-        self.mk_var((num_open_binders - dbj_level) - 1)
+    pub(crate) fn fvar_to_bvar(&mut self, num_open_binders: u32, dbj_level: u32) -> ExprPtr<'t> {
+        let idx = (num_open_binders - dbj_level) - 1;
+        let idx = u16::try_from(idx)
+            .expect("bound variable index beyond what a term can hold");
+        self.mk_var(idx)
     }
 }
 

@@ -106,7 +106,7 @@ pub enum Expr<'a> {
 /// a monotonically increasing counter, or a deBruijn level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FVarId {
-    DbjLevel(u16),
+    DbjLevel(u32),
     Unique(u32),
 }
 
@@ -223,7 +223,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     /// Abstraction with deBruijn levels instead of unique identifiers.
-    fn abstr_aux_levels(&mut self, e: ExprPtr<'t>, start_pos: u16, num_open_binders: u16) -> ExprPtr<'t> {
+    fn abstr_aux_levels(&mut self, e: ExprPtr<'t>, start_pos: u32, num_open_binders: u32) -> ExprPtr<'t> {
         if !self.has_fvars(e) {
             e
         } else if let Some(cached) = self.expr_cache.abstr_cache_levels.get(&(e, start_pos, num_open_binders)) {
@@ -275,13 +275,13 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub(crate) fn abstr_levels_at(
         &mut self,
         e: ExprPtr<'t>,
-        start_pos: u16,
-        num_open_binders: u16,
+        start_pos: u32,
+        num_open_binders: u32,
     ) -> ExprPtr<'t> {
         self.abstr_aux_levels(e, start_pos, num_open_binders)
     }
 
-    pub fn abstr_levels(&mut self, e: ExprPtr<'t>, start_pos: u16) -> ExprPtr<'t> {
+    pub fn abstr_levels(&mut self, e: ExprPtr<'t>, start_pos: u32) -> ExprPtr<'t> {
         self.expr_cache.abstr_cache_levels.clear();
         self.abstr_aux_levels(e, start_pos, self.dbj_level_counter)
     }

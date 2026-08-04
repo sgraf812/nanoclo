@@ -57,7 +57,7 @@ pub(crate) struct EnvNode<'t> {
     parent: EnvId,
     len: u32,
     /// one past the highest de Bruijn level bound anywhere in this chain
-    next_level: u16,
+    next_level: u32,
     /// Myers jump pointer for O(log n) indexing
     jump: EnvId,
 }
@@ -115,7 +115,7 @@ pub(crate) struct RapierSt<'t> {
     eq_neg: FxHashSet<(Clo<'t>, Clo<'t>)>,
     reify_go_cache: Gen2<(ExprPtr<'t>, EnvId, u16), ExprPtr<'t>>,
     /// `e -> one past the highest de Bruijn level of an fvar occurring in it`
-    lvl_cache: FxHashMap<ExprPtr<'t>, u16>,
+    lvl_cache: FxHashMap<ExprPtr<'t>, u32>,
     /// `e -> the loose bvar indices it reads`
     umask_cache: FxHashMap<ExprPtr<'t>, Uses>,
     /// `(read set, env) -> that environment projected onto that set`. The
@@ -306,12 +306,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn rp_env_len(&self, env: EnvId) -> u32 { self.ctx.rp.envs[env as usize].len }
 
-    fn rp_env_next_level(&self, env: EnvId) -> u16 { self.ctx.rp.envs[env as usize].next_level }
+    fn rp_env_next_level(&self, env: EnvId) -> u32 { self.ctx.rp.envs[env as usize].next_level }
 
     /// One past the highest de Bruijn level carried by a free variable in
     /// `e`. Free variables reach an expression only from the context it was
     /// built in, so this is bounded by the depth of that context.
-    fn rp_max_level(&mut self, e: ExprPtr<'t>) -> u16 {
+    fn rp_max_level(&mut self, e: ExprPtr<'t>) -> u32 {
         if !self.ctx.has_fvars(e) {
             return 0;
         }
@@ -341,7 +341,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// The de Bruijn level to give a binder opened inside the closure
     /// `(e, env)`: one past every level reachable from it, so the variable
     /// that names that binder cannot be confused with one already in scope.
-    fn rp_next_level(&mut self, e: ExprPtr<'t>, env: EnvId) -> u16 {
+    fn rp_next_level(&mut self, e: ExprPtr<'t>, env: EnvId) -> u32 {
         self.rp_max_level(e).max(self.rp_env_next_level(env))
     }
 
@@ -477,7 +477,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// instead of being fresh every time. The binder type is part of the
     /// variable's identity, so a level shared by two binders of different
     /// types still gives two variables.
-    fn rp_fvar_at(&mut self, level: u16, ty: ExprPtr<'t>) -> ExprPtr<'t> {
+    fn rp_fvar_at(&mut self, level: u32, ty: ExprPtr<'t>) -> ExprPtr<'t> {
         let anon = self.ctx.anonymous();
         self.ctx.remake_dbj_level(anon, BinderStyle::Default, ty, level)
     }
@@ -2103,7 +2103,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut env = c.env;
         let mut e = c.e;
         let mut binders = Vec::new();
-        let mut start = 0u16;
+        let mut start = 0u32;
         while let Lambda { binder_name, binder_style, binder_type, body, .. } =
             self.ctx.read_expr(e)
         {
@@ -2123,10 +2123,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let bt = self.rp_infer(Clo { e, env }, flag);
         let bt = self.rp_cheap_beta_reduce(bt);
-        let n = u16::try_from(binders.len()).unwrap();
+        let n = u32::try_from(binders.len()).unwrap();
         let mut r = self.ctx.abstr_levels_at(bt, start, start + n);
         for (i, (binder_name, binder_style, d)) in binders.into_iter().enumerate().rev() {
-            let i = u16::try_from(i).unwrap();
+            let i = u32::try_from(i).unwrap();
             let d = self.ctx.abstr_levels_at(d, start, start + i);
             r = self.ctx.mk_pi(binder_name, binder_style, d, r);
         }
