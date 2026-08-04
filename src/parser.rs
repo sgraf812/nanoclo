@@ -728,6 +728,15 @@ impl<'a, R: BufRead> Parser<'a, R> {
                 self.record_expr(assigned_idx.unwrap(), insert_result)?;
             }
             ExprBVar(dbj_idx) => {
+                // The loose bvar range of a variable is one past its index, so
+                // the largest index a variable can hold has no representable
+                // range. Refuse it here rather than let the range wrap.
+                if dbj_idx == u16::MAX {
+                    return Err(Box::<dyn Error>::from(format!(
+                        "line {}: bound variable index {} is too large",
+                        self.line_num, dbj_idx
+                    )))
+                }
                 let insert_result = {
                     let hash = hash64!(crate::expr::VAR_HASH, dbj_idx);
                     self.dag.exprs.insert_full(Expr::Var { dbj_idx, hash })
