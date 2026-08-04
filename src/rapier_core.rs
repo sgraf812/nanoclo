@@ -92,6 +92,17 @@ fn pack_entry_key(env: EnvId, entry: Entry) -> (u64, u64) {
     }
 }
 
+/// The loose bvar indices an expression reads. `Dense` is every index below
+/// its range, so projecting an environment onto it changes nothing; `Mask` is
+/// exact for a range that fits a word; `Wide` is a range beyond a word that is
+/// not dense.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Uses {
+    Dense,
+    Mask(u64),
+    Wide,
+}
+
 pub(crate) struct RapierSt<'t> {
     envs: Vec<EnvNode<'t>>,
     /// keyed by `pack_entry_key(parent, entry)`
@@ -105,6 +116,10 @@ pub(crate) struct RapierSt<'t> {
     reify_go_cache: Gen2<(ExprPtr<'t>, EnvId, u16), ExprPtr<'t>>,
     /// `e -> one past the highest de Bruijn level of an fvar occurring in it`
     lvl_cache: FxHashMap<ExprPtr<'t>, u16>,
+    /// `e -> the loose bvar indices it reads`
+    umask_cache: FxHashMap<ExprPtr<'t>, Uses>,
+    /// `(e, env) -> that environment projected onto those indices`
+    proj_cache: FxHashMap<(ExprPtr<'t>, EnvId), EnvId>,
     /// keyed by the packed `(ae|aenv, be|benv, aoff|boff)` triple
     eq_mod_cache: Gen2<(u64, u64, u32), bool>,
     clo_fvar_cache: Gen2<(ExprPtr<'t>, EnvId, u16), bool>,
@@ -164,6 +179,8 @@ impl<'t> RapierSt<'t> {
             eq_neg: new_fx_hash_set(),
             reify_go_cache: Gen2::new(),
             lvl_cache: new_fx_hash_map(),
+            umask_cache: new_fx_hash_map(),
+            proj_cache: new_fx_hash_map(),
             eq_mod_cache: Gen2::new(),
             clo_fvar_cache: Gen2::new(),
             g_unfold: FxHashMap::with_capacity_and_hasher(1 << 16, Default::default()),
@@ -210,6 +227,8 @@ impl<'t> RapierSt<'t> {
         rs(&mut self.eq_neg);
         self.reify_go_cache.reset_decl();
         rm(&mut self.lvl_cache);
+        rm(&mut self.umask_cache);
+        rm(&mut self.proj_cache);
         self.eq_mod_cache.reset_decl();
         self.clo_fvar_cache.reset_decl();
     }
@@ -358,6 +377,60 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         id
     }
 
+    /// Which loose bvar indices `e` reads. Union at an application is a
+    /// bitwise or and passing a binder is a shift, both constant time, and a
+    /// set covering everything below the range needs no representation.
+    fn rp_uses_mask(&mut self, e: ExprPtr<'t>) -> Uses {
+        let n = self.ctx.read_expr(e);
+        let lbr = n.num_loose_bvars();
+        if lbr == 0 {
+            return Uses::Mask(0);
+        }
+        if let Some(&u) = self.ctx.rp.umask_cache.get(&e) {
+            return u;
+        }
+        fn join(a: Uses, b: Uses) -> Uses {
+            match (a, b) {
+                (Uses::Mask(x), Uses::Mask(y)) => Uses::Mask(x | y),
+                _ => Uses::Wide,
+            }
+        }
+        fn under(u: Uses) -> Uses {
+            match u {
+                Uses::Mask(m) => Uses::Mask(m >> 1),
+                other => other,
+            }
+        }
+        let u = match n {
+            Var { dbj_idx, .. } if dbj_idx < 64 => Uses::Mask(1u64 << dbj_idx),
+            Var { .. } => Uses::Wide,
+            App { fun, arg, .. } => {
+                let a = self.rp_uses_mask(fun);
+                let b = self.rp_uses_mask(arg);
+                join(a, b)
+            }
+            Lambda { binder_type, body, .. } | Pi { binder_type, body, .. } => {
+                let d = self.rp_uses_mask(binder_type);
+                let b = self.rp_uses_mask(body);
+                join(d, under(b))
+            }
+            Let { binder_type, val, body, .. } => {
+                let t = self.rp_uses_mask(binder_type);
+                let v = self.rp_uses_mask(val);
+                let b = self.rp_uses_mask(body);
+                join(join(t, v), under(b))
+            }
+            Proj { structure, .. } => self.rp_uses_mask(structure),
+            _ => Uses::Mask(0),
+        };
+        let u = match u {
+            Uses::Mask(m) if lbr <= 64 && m == u64::MAX >> (64 - lbr) => Uses::Dense,
+            u => u,
+        };
+        self.ctx.rp.umask_cache.insert(e, u);
+        u
+    }
+
     /// entry for de Bruijn index `i` (0 = innermost)
     fn rp_lookup(&self, env: EnvId, i: u16) -> Entry<'t> {
         let len = self.rp_env_len(env);
@@ -416,14 +489,49 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    /// E0 key normalization: a closed expression ignores its environment.
-    #[inline]
-    fn rp_key(&self, c: Clo<'t>) -> Clo<'t> {
-        if c.env != ENV_NIL && self.lbr(c.e) == 0 {
-            Clo::of(c.e)
-        } else {
-            c
+    /// The identity of a closure as a question: the expression together with
+    /// the bindings that expression reads. Everything else in the environment
+    /// is invisible to it, so closures differing only there ask the same
+    /// question and share one answer.
+    fn rp_key(&mut self, c: Clo<'t>) -> Clo<'t> {
+        if c.env == ENV_NIL {
+            return c;
         }
+        let mask = match self.rp_uses_mask(c.e) {
+            Uses::Mask(0) => return Clo::of(c.e),
+            Uses::Mask(m) => m,
+            Uses::Dense | Uses::Wide => return c,
+        };
+        if let Some(&env) = self.ctx.rp.proj_cache.get(&(c.e, c.env)) {
+            return Clo { e: c.e, env };
+        }
+        // Every index in the mask is below 64, so the entries it names sit
+        // within the first 64 links: one walk collects them all.
+        let mut picked: [Option<Entry<'t>>; 64] = [None; 64];
+        let mut cur = c.env;
+        for d in 0..64 {
+            if cur == ENV_NIL {
+                break;
+            }
+            let node = &self.ctx.rp.envs[cur as usize];
+            if mask & (1u64 << d) != 0 {
+                picked[d] = Some(node.entry);
+            }
+            if mask >> d == 1 {
+                break;
+            }
+            cur = node.parent;
+        }
+        let mut proj = ENV_NIL;
+        let mut m = mask;
+        while m != 0 {
+            let i = m.trailing_zeros() as usize;
+            m &= m - 1;
+            let entry = picked[i].expect("projection: index outside the environment");
+            proj = self.rp_push_entry(proj, entry);
+        }
+        self.ctx.rp.proj_cache.insert((c.e, c.env), proj);
+        Clo { e: c.e, env: proj }
     }
 
     /// Cache-key normalization: resolve bvar heads to the entry they denote;
@@ -677,7 +785,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             | Local { .. } => return SClo { head: c, spine: Vec::new() },
             _ => {}
         }
-        if let Some(r) = self.ctx.rp.whnf_cache.get(&c) {
+        let k = self.rp_key(c);
+        if let Some(r) = self.ctx.rp.whnf_cache.get(&k) {
             let r = r.clone();
             self.ctx.rp.ctrs[4] += 1;
             return r;
@@ -691,7 +800,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // is the difference between linear and exponential. Measured on the
         // nested-beta family at n=1500: ~1s with it intact, >90s when capped,
         // while capping the other memos costs nothing even at 2^10.
-        self.ctx.rp.whnf_cache.insert(c, r.clone());
+        self.ctx.rp.whnf_cache.insert(k, r.clone());
         r
     }
 
@@ -1237,7 +1346,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return true;
         }
         let (tk, sk) = (self.rp_norm_clo(t), self.rp_norm_clo(s));
-        if self.ctx.rp.eq_pos.known_eq(&tk, &sk) {
+        let (tkey, skey) = (self.rp_key(tk), self.rp_key(sk));
+        if self.ctx.rp.eq_pos.known_eq(&tkey, &skey) {
             self.ctx.rp.ctrs[6] += 1;
             return true;
         }
@@ -1260,7 +1370,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             return r;
         }
-        let pk = if clo_le(&tk, &sk) { (tk, sk) } else { (sk, tk) };
+        let pk = if clo_le(&tkey, &skey) { (tkey, skey) } else { (skey, tkey) };
         if self.ctx.rp.eq_neg.contains(&pk) {
             self.ctx.rp.ctrs[6] += 1;
             return false;
@@ -1268,7 +1378,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.ctx.rp.ctrs[7] += 1;
         let r = self.rp_is_def_eq_clo(tk, sk);
         if r {
-            self.ctx.rp.eq_pos.union(tk, sk);
+            self.ctx.rp.eq_pos.union(tkey, skey);
         } else {
             self.ctx.rp.eq_neg.insert(pk);
         }
