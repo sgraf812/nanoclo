@@ -118,8 +118,10 @@ pub(crate) struct RapierSt<'t> {
     lvl_cache: FxHashMap<ExprPtr<'t>, u16>,
     /// `e -> the loose bvar indices it reads`
     umask_cache: FxHashMap<ExprPtr<'t>, Uses>,
-    /// `(e, env) -> that environment projected onto those indices`
-    proj_cache: FxHashMap<(ExprPtr<'t>, EnvId), EnvId>,
+    /// `(read set, env) -> that environment projected onto that set`. The
+    /// projection depends on the set and not on the expression that induced
+    /// it, so expressions reading the same positions share one projection.
+    proj_cache: FxHashMap<(u64, EnvId), EnvId>,
     /// keyed by the packed `(ae|aenv, be|benv, aoff|boff)` triple
     eq_mod_cache: Gen2<(u64, u64, u32), bool>,
     clo_fvar_cache: Gen2<(ExprPtr<'t>, EnvId, u16), bool>,
@@ -232,6 +234,16 @@ impl<'t> RapierSt<'t> {
         self.eq_mod_cache.reset_decl();
         self.clo_fvar_cache.reset_decl();
     }
+}
+
+fn proj_off() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("RAPIER_NO_PROJ").is_ok())
+}
+
+fn eqproj_off() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("RAPIER_EQPROJ").is_err())
 }
 
 /// Entry ceiling per memo table, tunable for experiments.
@@ -497,12 +509,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if c.env == ENV_NIL {
             return c;
         }
+        if proj_off() {
+            return if self.lbr(c.e) == 0 { Clo::of(c.e) } else { c };
+        }
         let mask = match self.rp_uses_mask(c.e) {
             Uses::Mask(0) => return Clo::of(c.e),
             Uses::Mask(m) => m,
             Uses::Dense | Uses::Wide => return c,
         };
-        if let Some(&env) = self.ctx.rp.proj_cache.get(&(c.e, c.env)) {
+        if let Some(&env) = self.ctx.rp.proj_cache.get(&(mask, c.env)) {
             return Clo { e: c.e, env };
         }
         // Every index in the mask is below 64, so the entries it names sit
@@ -530,8 +545,53 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let entry = picked[i].expect("projection: index outside the environment");
             proj = self.rp_push_entry(proj, entry);
         }
-        self.ctx.rp.proj_cache.insert((c.e, c.env), proj);
+        self.ctx.rp.proj_cache.insert((mask, c.env), proj);
         Clo { e: c.e, env: proj }
+    }
+
+    /// The environment `e` reads through, when `e` sits under `off` binders
+    /// entered since the comparison began: its own indices at or above `off`
+    /// name environment positions `i - off`.
+    fn rp_proj_at(&mut self, e: ExprPtr<'t>, env: EnvId, off: u16) -> EnvId {
+        if env == ENV_NIL || eqproj_off() {
+            return env;
+        }
+        let mask = match self.rp_uses_mask(e) {
+            Uses::Mask(m) if off < 64 => m >> off,
+            Uses::Mask(_) => 0,
+            Uses::Dense | Uses::Wide => return env,
+        };
+        if mask == 0 {
+            return ENV_NIL;
+        }
+        if let Some(&p) = self.ctx.rp.proj_cache.get(&(mask, env)) {
+            return p;
+        }
+        let mut picked: [Option<Entry<'t>>; 64] = [None; 64];
+        let mut cur = env;
+        for d in 0..64 {
+            if cur == ENV_NIL {
+                break;
+            }
+            let node = &self.ctx.rp.envs[cur as usize];
+            if mask & (1u64 << d) != 0 {
+                picked[d] = Some(node.entry);
+            }
+            if mask >> d == 1 {
+                break;
+            }
+            cur = node.parent;
+        }
+        let mut proj = ENV_NIL;
+        let mut m = mask;
+        while m != 0 {
+            let i = m.trailing_zeros() as usize;
+            m &= m - 1;
+            let Some(entry) = picked[i] else { return env };
+            proj = self.rp_push_entry(proj, entry);
+        }
+        self.ctx.rp.proj_cache.insert((mask, env), proj);
+        proj
     }
 
     /// Cache-key normalization: resolve bvar heads to the entry they denote;
@@ -672,8 +732,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // there keys as (e, NIL, 0). eq_mod is symmetric, so the two sides
         // are ordered canonically and each question is stored once.
         let blbr = bn.num_loose_bvars();
-        let (ka_env, ka_off) = if albr <= aoff { (ENV_NIL, 0u16) } else { (aenv, aoff) };
-        let (kb_env, kb_off) = if blbr <= boff { (ENV_NIL, 0u16) } else { (benv, boff) };
+        let (ka_env, ka_off) =
+            if albr <= aoff { (ENV_NIL, 0u16) } else { (self.rp_proj_at(ae, aenv, aoff), aoff) };
+        let (kb_env, kb_off) =
+            if blbr <= boff { (ENV_NIL, 0u16) } else { (self.rp_proj_at(be, benv, boff), boff) };
         let ka = (ka_env as u64) << 32 | ae.get_hash();
         let kb = (kb_env as u64) << 32 | be.get_hash();
         let memo_key = if ka <= kb {

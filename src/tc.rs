@@ -99,6 +99,8 @@ impl<'p> ExportFile<'p> {
                         .ok().and_then(|v| v.parse().ok()).unwrap_or(0);
                     let stop_after: Option<usize> = std::env::var("RAPIER_STOP_AFTER")
                         .ok().and_then(|v| v.parse().ok());
+                    let repeat: usize = std::env::var("RAPIER_REPEAT")
+                        .ok().and_then(|v| v.parse().ok()).unwrap_or(1);
                     for (i, declar) in self.declars.values().enumerate() {
                         if i < skip {
                             continue
@@ -107,6 +109,9 @@ impl<'p> ExportFile<'p> {
                             if i > stop {
                                 break
                             }
+                        }
+                        for _ in 1..repeat {
+                            self.check_declar(declar);
                         }
                         if report {
                             if thresh == 0 {
