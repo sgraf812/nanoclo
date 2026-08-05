@@ -141,6 +141,20 @@ pub(crate) struct RapierSt<'t> {
     g_eq_pos: UnionFind<ExprPtr<'t>>,
     g_eq_neg: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
 
+    /// How many conversion steps a speculative comparison may spend before
+    /// it is abandoned, 0 outside one.
+    probe_fuel: u64,
+    probe_depth: u32,
+    probe_aborted: bool,
+    /// Pairs found unequal while a speculative comparison was running. They
+    /// are answers only if that comparison finished, so they are held here
+    /// and moved into `eq_neg` when it does.
+    probe_neg: FxHashSet<(Clo<'t>, Clo<'t>)>,
+    /// `probe_neg` in the order it was filled, so a comparison that is
+    /// abandoned takes back exactly what it contributed.
+    probe_neg_log: Vec<(Clo<'t>, Clo<'t>)>,
+    probe_gneg: Vec<(ExprPtr<'t>, ExprPtr<'t>)>,
+
     /// diagnostic counters: [infer, whnf_core, whnf, def_eq, whnf_hit,
     /// whnf_miss, whnf_core_hit, whnf_core_miss, unfold_hit, unfold_miss,
     /// push_entry, eq_mod]
@@ -192,6 +206,12 @@ impl<'t> RapierSt<'t> {
             g_inst_ty: FxHashMap::with_capacity_and_hasher(1 << 18, Default::default()),
             g_eq_pos: UnionFind::new(),
             g_eq_neg: FxHashSet::with_capacity_and_hasher(1 << 16, Default::default()),
+            probe_fuel: 0,
+            probe_depth: 0,
+            probe_aborted: false,
+            probe_neg: new_fx_hash_set(),
+            probe_neg_log: Vec::new(),
+            probe_gneg: Vec::new(),
             ctrs: [0; 18],
         }
     }
@@ -230,6 +250,11 @@ impl<'t> RapierSt<'t> {
         rm(&mut self.whnf_cache);
         self.eq_pos.clear();
         rs(&mut self.eq_neg);
+        rs(&mut self.probe_neg);
+        self.probe_neg_log.clear();
+        self.probe_gneg.clear();
+        self.probe_depth = 0;
+        self.probe_aborted = false;
         self.reify_go_cache.reset_decl();
         rm(&mut self.lvl_cache);
         rm(&mut self.umask_cache);
@@ -253,6 +278,30 @@ pub(crate) fn nbe_on() -> bool {
 fn eqproj_off() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| std::env::var("RAPIER_EQPROJ").is_err())
+}
+
+/// Rounds of growing budget before the arguments of an application are
+/// compared without one.
+const FAIR_ROUNDS: u32 = 3;
+
+/// Conversion steps a speculative comparison may spend.
+fn probe_budget() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("RAPIER_PROBE").ok().and_then(|v| v.parse().ok()).unwrap_or(64)
+    })
+}
+
+/// Whether the arguments of an application are compared in rounds.
+fn fair_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("RAPIER_FAIR").is_ok())
+}
+
+/// Whether a speculative comparison is bounded at all.
+fn probe_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("RAPIER_PROBE").is_ok() || std::env::var("RAPIER_FAIR").is_ok())
 }
 
 /// Entry ceiling per memo table, tunable for experiments.
@@ -846,7 +895,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// stack on demand here rather than sizing a thread stack for the worst
     /// input.
     pub(crate) fn rp_whnf_clo(&mut self, c: Clo<'t>) -> SClo<'t> {
-        stacker::maybe_grow(256 * 1024, 16 * 1024 * 1024, move || self.rp_whnf_clo_inner(c))
+        let d = self.rp_probe_suspend();
+        let r = stacker::maybe_grow(256 * 1024, 16 * 1024 * 1024, || self.rp_whnf_clo_inner(c));
+        self.rp_probe_resume(d);
+        r
     }
 
     fn rp_whnf_clo_inner(&mut self, c: Clo<'t>) -> SClo<'t> {
@@ -1409,12 +1461,95 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         Clo { e, env }
     }
 
+    // ---- bounded speculation ----
+    //
+    // Several points in conversion admit more than one next step, and taking
+    // the wrong one can cost unboundedly more than the answer is worth.
+    // Comparing the arguments of two applications of one constant is such a
+    // point: the arguments may differ while the applications are equal, so a
+    // comparison that runs long is evidence that unfolding the constant is
+    // the cheaper route. Running it under a fuel bound turns "wait for the
+    // answer" into "give it a fixed budget, then take the other route".
+    //
+    // A comparison abandoned this way has produced no answer, so nothing it
+    // computed may be recorded as one. Reduction is left unbounded, since a
+    // truncated weak head normal form would be recorded by the memos that
+    // reduction shares with inference.
+
+    fn rp_probe_enter(&mut self, budget: u64) -> (u64, bool, usize, usize) {
+        let saved = (
+            self.ctx.rp.probe_fuel,
+            self.ctx.rp.probe_aborted,
+            self.ctx.rp.probe_neg_log.len(),
+            self.ctx.rp.probe_gneg.len(),
+        );
+        self.ctx.rp.probe_depth += 1;
+        self.ctx.rp.probe_fuel = budget;
+        self.ctx.rp.probe_aborted = false;
+        saved
+    }
+
+    /// Whether the comparison ran out of fuel, in which case its answer says
+    /// nothing. A comparison that finished contributes what it found unequal.
+    fn rp_probe_exit(&mut self, saved: (u64, bool, usize, usize)) -> bool {
+        let aborted = self.ctx.rp.probe_aborted;
+        self.ctx.rp.probe_depth -= 1;
+        self.ctx.rp.probe_fuel = saved.0;
+        self.ctx.rp.probe_aborted = saved.1;
+        if aborted {
+            while self.ctx.rp.probe_neg_log.len() > saved.2 {
+                let pk = self.ctx.rp.probe_neg_log.pop().unwrap();
+                self.ctx.rp.probe_neg.remove(&pk);
+            }
+            self.ctx.rp.probe_gneg.truncate(saved.3);
+        } else if self.ctx.rp.probe_depth == 0 {
+            while let Some(pk) = self.ctx.rp.probe_neg_log.pop() {
+                self.ctx.rp.eq_neg.insert(pk);
+            }
+            self.ctx.rp.probe_neg.clear();
+            while let Some(gpk) = self.ctx.rp.probe_gneg.pop() {
+                self.ctx.rp.g_eq_neg.insert(gpk);
+            }
+        }
+        aborted
+    }
+
+    #[inline]
+    fn rp_spend(&mut self) {
+        if self.ctx.rp.probe_depth > 0 && !self.ctx.rp.probe_aborted {
+            if self.ctx.rp.probe_fuel == 0 {
+                self.ctx.rp.probe_aborted = true;
+            } else {
+                self.ctx.rp.probe_fuel -= 1;
+            }
+        }
+    }
+
+    #[inline]
+    fn rp_in_probe(&self) -> bool { self.ctx.rp.probe_depth > 0 }
+
+    /// Step outside the budget. Reduction and inference write memos that
+    /// conversion shares with the rest of the checker, and an entry recorded
+    /// from a truncated reduction would be read later as a final answer, so
+    /// they run to completion whatever the budget says.
+    #[inline]
+    fn rp_probe_suspend(&mut self) -> u32 {
+        std::mem::replace(&mut self.ctx.rp.probe_depth, 0)
+    }
+
+    #[inline]
+    fn rp_probe_resume(&mut self, depth: u32) { self.ctx.rp.probe_depth = depth; }
+
     // ---- def-eq ----
 
     pub(crate) fn rp_is_def_eq(&mut self, t: Clo<'t>, s: Clo<'t>) -> bool {
         self.ctx.rp.ctrs[3] += 1;
         if self.rp_clo_eq(t, s) {
             return true;
+        }
+        self.rp_spend();
+        if self.ctx.rp.probe_aborted {
+            return false;
         }
         let (tk, sk) = (self.rp_norm_clo(t), self.rp_norm_clo(s));
         let (tkey, skey) = (self.rp_key(tk), self.rp_key(sk));
@@ -1436,13 +1571,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let r = self.rp_is_def_eq_clo(tk, sk);
             if r {
                 self.ctx.rp.g_eq_pos.union(a, b);
+            } else if self.rp_in_probe() {
+                self.ctx.rp.probe_gneg.push(gpk);
             } else {
                 self.ctx.rp.g_eq_neg.insert(gpk);
             }
             return r;
         }
         let pk = if clo_le(&tkey, &skey) { (tkey, skey) } else { (skey, tkey) };
-        if self.ctx.rp.eq_neg.contains(&pk) {
+        if self.ctx.rp.eq_neg.contains(&pk)
+            || (self.rp_in_probe() && self.ctx.rp.probe_neg.contains(&pk))
+        {
             self.ctx.rp.ctrs[6] += 1;
             return false;
         }
@@ -1450,6 +1589,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let r = self.rp_is_def_eq_clo(tk, sk);
         if r {
             self.ctx.rp.eq_pos.union(tkey, skey);
+        } else if self.rp_in_probe() {
+            if self.ctx.rp.probe_neg.insert(pk) {
+                self.ctx.rp.probe_neg_log.push(pk);
+            }
         } else {
             self.ctx.rp.eq_neg.insert(pk);
         }
@@ -1616,8 +1759,45 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if t.spine.len() != s.spine.len() {
             return false;
         }
+        if fair_on() && t.spine.len() > 1 && !self.rp_in_probe() {
+            return self.rp_def_eq_spines_fair(t, s);
+        }
         for (&x, &y) in t.spine.iter().zip(s.spine.iter()) {
             if !self.rp_is_def_eq(x, y) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// One refuted argument refutes the whole application, so the arguments
+    /// are visited in rounds of growing budget and the first refutation ends
+    /// the comparison. An argument whose budget runs out is carried to the
+    /// next round, where the memos make revisiting it cheap. The last round
+    /// is unbounded, so every comparison ends with an answer.
+    fn rp_def_eq_spines_fair(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> bool {
+        let mut pending: smallvec::SmallVec<[usize; 8]> = (0..t.spine.len()).collect();
+        let mut budget = probe_budget();
+        for _ in 0..FAIR_ROUNDS {
+            let mut next: smallvec::SmallVec<[usize; 8]> = smallvec::SmallVec::new();
+            for &i in pending.iter() {
+                let saved = self.rp_probe_enter(budget);
+                let r = self.rp_is_def_eq(t.spine[i], s.spine[i]);
+                let aborted = self.rp_probe_exit(saved);
+                if aborted {
+                    next.push(i);
+                } else if !r {
+                    return false;
+                }
+            }
+            if next.is_empty() {
+                return true;
+            }
+            pending = next;
+            budget = budget.saturating_mul(4);
+        }
+        for &i in pending.iter() {
+            if !self.rp_is_def_eq(t.spine[i], s.spine[i]) {
                 return false;
             }
         }
@@ -1775,6 +1955,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if fuel == 0 {
             panic!("lazy_delta: fuel exhausted");
         }
+        self.rp_spend();
+        if self.ctx.rp.probe_aborted {
+            return Err((tn, sn));
+        }
         if self.rp_s_quick_eq(&tn, &sn) {
             return Ok(true);
         }
@@ -1836,8 +2020,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                                 }
                                 _ => false,
                             };
-                        if same_const && self.rp_def_eq_spines(&tn, &sn) {
-                            return Ok(true);
+                        if same_const && !probe_on() {
+                            if self.rp_def_eq_spines(&tn, &sn) {
+                                return Ok(true);
+                            }
+                        } else if same_const {
+                            let saved = self.rp_probe_enter(probe_budget());
+                            let r = self.rp_def_eq_spines(&tn, &sn);
+                            let aborted = self.rp_probe_exit(saved);
+                            if r && !aborted {
+                                return Ok(true);
+                            }
                         }
                     }
                     let t2 = self.rp_delta1(&tn);
@@ -2022,6 +2215,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     // ---- inference ----
 
     pub(crate) fn rp_infer(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
+        let d = self.rp_probe_suspend();
+        let r = self.rp_infer_go(c, flag);
+        self.rp_probe_resume(d);
+        r
+    }
+
+    fn rp_infer_go(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
         self.ctx.rp.ctrs[0] += 1;
         let n = self.ctx.read_expr(c.e);
         match n {
