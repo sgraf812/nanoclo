@@ -280,6 +280,7 @@ pub struct TcCtx<'t, 'p> {
     /// `rapier_core.rs`. Lives here so that it can persist for the lifetime
     /// of the context (one context per checking thread).
     pub(crate) rp: crate::rapier_core::RapierSt<'t>,
+    pub(crate) nb: crate::nbe::Vals<'t>,
 }
 
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
@@ -291,6 +292,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             unique_counter: 0u32,
             expr_cache: ExprCache::new(),
             rp: crate::rapier_core::RapierSt::new(),
+            nb: crate::nbe::Vals::new(),
         }
     }
 

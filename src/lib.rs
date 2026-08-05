@@ -11,6 +11,8 @@ pub mod expr;
 pub mod inductive;
 pub mod level;
 pub mod name;
+pub(crate) mod nbe;
+pub(crate) mod nbe_eval;
 pub mod parser;
 pub mod pretty_printer;
 pub mod quot;
