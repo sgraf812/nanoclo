@@ -304,10 +304,6 @@ fn probe_on() -> bool {
     *V.get_or_init(|| std::env::var("RAPIER_PROBE").is_ok() || std::env::var("RAPIER_FAIR").is_ok())
 }
 
-/// Percentage of the positions the projection walk would visit that a read
-/// set may cover before the eq_mod key is left unprojected.
-const PROJ_RATIO: u32 = 50;
-
 /// Entry ceiling per memo table, tunable for experiments.
 fn ccap() -> usize {
     static CCAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -625,12 +621,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         };
         if mask == 0 {
             return ENV_NIL;
-        }
-        // A read set covering most of the positions the walk would visit
-        // projects to what it started from, so the walk buys nothing.
-        let len = self.rp_env_len(env).min(64);
-        if mask.count_ones() * 100 >= PROJ_RATIO * len {
-            return env;
         }
         if let Some(&p) = self.ctx.rp.proj_cache.get(&(mask, env)) {
             return p;
