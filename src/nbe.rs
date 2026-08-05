@@ -100,6 +100,9 @@ pub(crate) struct VEnvNode {
     pub(crate) v: ValId,
     pub(crate) parent: VEnvId,
     pub(crate) len: u32,
+    /// Myers skew-binary jump pointer, so reading index `i` takes O(log i)
+    /// steps rather than `i`.
+    pub(crate) jump: VEnvId,
 }
 
 pub(crate) struct SpineNode<'t> {
@@ -177,7 +180,7 @@ impl<'t> Vals<'t> {
             // index 0 of each of these arenas is the empty case, so that
             // VENV_NIL and SPINE_EMPTY are valid indices needing no special
             // casing on the lookup paths.
-            venvs: vec![VEnvNode { v: 0, parent: 0, len: 0 }],
+            venvs: vec![VEnvNode { v: 0, parent: 0, len: 0, jump: 0 }],
             spines: vec![SpineNode {
                 elim: Elim::Proj {
                     ty_name: crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0),
@@ -235,7 +238,7 @@ impl<'t> Vals<'t> {
         }
         if self.vals.capacity() > (1 << 20) {
             self.vals = Vec::new();
-            self.venvs = vec![VEnvNode { v: 0, parent: 0, len: 0 }];
+            self.venvs = vec![VEnvNode { v: 0, parent: 0, len: 0, jump: 0 }];
             let sentinel = self.spines.remove(0);
             self.spines = vec![sentinel];
         } else {
@@ -293,25 +296,35 @@ impl<'t> Vals<'t> {
         if let Some(&e) = self.venv_intern.get(&(parent, v)) {
             return e;
         }
-        let len = self.venvs[parent as usize].len + 1;
+        let p = &self.venvs[parent as usize];
+        let len = p.len + 1;
+        // Two equal jumps in a row combine into one twice as long.
+        let jump = {
+            let d1 = p.len - self.venvs[p.jump as usize].len;
+            let j = &self.venvs[p.jump as usize];
+            let d2 = j.len - self.venvs[j.jump as usize].len;
+            if d1 == d2 && d1 != 0 { j.jump } else { parent }
+        };
         let id = u32::try_from(self.venvs.len()).expect("environment arena overflow");
-        self.venvs.push(VEnvNode { v, parent, len });
+        self.venvs.push(VEnvNode { v, parent, len, jump });
         self.venv_intern.insert((parent, v), id);
         id
     }
 
     /// The value bound to a de Bruijn index, counting from the innermost.
-    pub(crate) fn venv_lookup(&self, mut e: VEnvId, mut idx: u32) -> Option<ValId> {
+    pub(crate) fn venv_lookup(&self, mut e: VEnvId, idx: u32) -> Option<ValId> {
+        let start = self.venvs[e as usize].len;
+        let target = start.checked_sub(idx)?;
+        if target == 0 {
+            return None;
+        }
         loop {
             let node = &self.venvs[e as usize];
-            if node.len == 0 {
-                return None;
-            }
-            if idx == 0 {
+            if node.len == target {
                 return Some(node.v);
             }
-            idx -= 1;
-            e = node.parent;
+            let jump = &self.venvs[node.jump as usize];
+            e = if jump.len >= target { node.jump } else { node.parent };
         }
     }
 
