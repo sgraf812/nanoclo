@@ -74,10 +74,13 @@ impl<'t> Clo<'t> {
     fn okey(&self) -> (u64, u32) { (self.e.get_hash(), self.env) }
 }
 
+/// Spines are short in practice, so they live inline until they are not.
+pub(crate) type SpineVec<'t> = smallvec::SmallVec<[Clo<'t>; 8]>;
+
 #[derive(Clone)]
 pub(crate) struct SClo<'t> {
     pub head: Clo<'t>,
-    pub spine: Vec<Clo<'t>>,
+    pub spine: SpineVec<'t>,
 }
 
 fn clo_le(a: &Clo, b: &Clo) -> bool { a.okey() <= b.okey() }
@@ -822,7 +825,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     // ---- whnf ----
 
     pub(crate) fn rp_mk_sclo(&self, c: Clo<'t>) -> SClo<'t> {
-        let mut spine = Vec::new();
+        let mut spine = SpineVec::new();
         let mut e = c.e;
         while let App { fun, arg, .. } = self.ctx.read_expr(e) {
             spine.push(Clo { e: arg, env: c.env });
@@ -844,7 +847,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let c = self.rp_norm_clo(c);
         match self.ctx.read_expr(c.e) {
             NatLit { .. } | StringLit { .. } | Sort { .. } | Pi { .. } | Lambda { .. }
-            | Local { .. } => return SClo { head: c, spine: Vec::new() },
+            | Local { .. } => return SClo { head: c, spine: SpineVec::new() },
             _ => {}
         }
         let k = self.rp_key(c);
@@ -896,7 +899,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let c = self.rp_norm_clo(c);
         match self.ctx.read_expr(c.e) {
             NatLit { .. } | StringLit { .. } | Sort { .. } | Pi { .. } | Lambda { .. }
-            | Local { .. } => return SClo { head: c, spine: Vec::new() },
+            | Local { .. } => return SClo { head: c, spine: SpineVec::new() },
             _ => {}
         }
         let s = self.rp_mk_sclo(c);
@@ -912,7 +915,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut e = head.e;
         let mut env = head.env;
         // reversed spine: last element is the innermost (next) argument
-        let mut rsp: Vec<Clo<'t>> = spine.into_iter().rev().collect();
+        let mut rsp: SpineVec<'t> = spine.into_iter().rev().collect();
         loop {
             match self.ctx.read_expr(e) {
                 App { fun, arg, .. } => {
@@ -1099,12 +1102,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn rp_mk_nat_sclo(&mut self, n: BigUint) -> SClo<'t> {
         let e = self.ctx.mk_nat_lit_quick(n).unwrap();
-        SClo { head: Clo::of(e), spine: Vec::new() }
+        SClo { head: Clo::of(e), spine: SpineVec::new() }
     }
 
     fn rp_mk_bool_sclo(&mut self, b: bool) -> Option<SClo<'t>> {
         let e = self.ctx.bool_to_expr(b)?;
-        Some(SClo { head: Clo::of(e), spine: Vec::new() })
+        Some(SClo { head: Clo::of(e), spine: SpineVec::new() })
     }
 
     /// The Nat primitive this spined application would dispatch to, if any.
@@ -1324,7 +1327,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let ctor_e = self.ctx.mk_const(ctor, ils);
         let new_ctor = SClo {
             head: Clo::of(ctor_e),
-            spine: app_type.spine[..(num_params as usize).min(app_type.spine.len())].to_vec(),
+            spine: app_type.spine[..(num_params as usize).min(app_type.spine.len())].iter().copied().collect(),
         };
         let new_ty = self.rp_infer_s(&new_ctor, InferOnly);
         let app_clo = self.rp_sclo_as_clo(&app_type);
@@ -1372,8 +1375,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             None => return mj,
         };
         let mj_clo = self.rp_sclo_as_clo(&mj);
-        let mut spine: Vec<Clo<'t>> =
-            e_type.spine[..(num_params as usize).min(e_type.spine.len())].to_vec();
+        let mut spine: SpineVec<'t> =
+            e_type.spine[..(num_params as usize).min(e_type.spine.len())].iter().copied().collect();
         for fi in 0..num_fields {
             let bv = self.ctx.mk_var(0);
             let proj = self.ctx.mk_proj(i, fi as usize, bv);
@@ -2177,7 +2180,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut f_ty: Clo<'t> = Clo::of(self.rp_infer(s.head, flag));
         for &arg in s.spine.iter() {
             let fw = if matches!(self.ctx.read_expr(f_ty.e), Pi { .. }) {
-                SClo { head: f_ty, spine: Vec::new() }
+                SClo { head: f_ty, spine: SpineVec::new() }
             } else {
                 self.rp_whnf_clo(f_ty)
             };
