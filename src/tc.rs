@@ -59,7 +59,6 @@ impl<'p> ExportFile<'p> {
     /// Check a declaration in an existing context.
     pub fn check_declar_in<'t>(&'t self, ctx: &mut TcCtx<'t, 'p>, d: &Declar<'p>) {
         ctx.rp.reset_decl();
-        ctx.nb.reset_decl();
         use Declar::*;
         match d {
             Axiom { .. } => ctx.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()),
