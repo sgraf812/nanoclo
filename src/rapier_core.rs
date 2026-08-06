@@ -144,20 +144,21 @@ pub(crate) struct RapierSt<'t> {
     /// diagnostic counters: [infer, whnf_core, whnf, def_eq, whnf_hit,
     /// whnf_miss, whnf_core_hit, whnf_core_miss, unfold_hit, unfold_miss,
     /// push_entry, eq_mod]
-    pub(crate) ctrs: [u64; 18],
+    pub(crate) ctrs: [u64; 23],
 }
 
 /// Totals over all declarations, printed at exit when `RAPIER_CTRS` is set.
-pub static G_CTRS: [std::sync::atomic::AtomicU64; 18] =
-    [const { std::sync::atomic::AtomicU64::new(0) }; 18];
+pub static G_CTRS: [std::sync::atomic::AtomicU64; 23] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 23];
 
 pub fn ctrs_report() -> String {
     use std::sync::atomic::Ordering::Relaxed;
-    const NAMES: [&str; 18] = [
+    const NAMES: [&str; 23] = [
         "infer", "whnf_core", "whnf", "def_eq", "whnf_hit", "whnf_miss",
         "deq_hit", "deq_miss", "unfold_hit", "unfold_miss",
         "push_entry", "eq_mod", "eqm_hit", "eqm_miss", "eqm_fast", "eqm_nomemo",
-        "inf_hit", "inf_miss",
+        "inf_hit", "inf_miss", "inf_var_val", "inf_var_neu",
+        "inf_local", "inf_sort", "inf_const",
     ];
     let mut out = String::new();
     for (n, c) in NAMES.iter().zip(G_CTRS.iter()) {
@@ -192,7 +193,7 @@ impl<'t> RapierSt<'t> {
             g_inst_ty: FxHashMap::with_capacity_and_hasher(1 << 18, Default::default()),
             g_eq_pos: UnionFind::new(),
             g_eq_neg: FxHashSet::with_capacity_and_hasher(1 << 16, Default::default()),
-            ctrs: [0; 18],
+            ctrs: [0; 23],
         }
     }
 
@@ -1983,11 +1984,21 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let n = self.ctx.read_expr(c.e);
         match n {
             Var { dbj_idx, .. } => match self.rp_lookup(c.env, dbj_idx) {
-                Entry::Neu(fv) => self.rp_fvar_type(fv),
-                Entry::Val(e2, env2) => self.rp_infer(Clo { e: e2, env: env2 }, flag),
+                Entry::Neu(fv) => {
+                    self.ctx.rp.ctrs[19] += 1;
+                    self.rp_fvar_type(fv)
+                }
+                Entry::Val(e2, env2) => {
+                    self.ctx.rp.ctrs[18] += 1;
+                    self.rp_infer(Clo { e: e2, env: env2 }, flag)
+                }
             },
-            Local { binder_type, .. } => binder_type,
+            Local { binder_type, .. } => {
+                self.ctx.rp.ctrs[20] += 1;
+                binder_type
+            }
             Sort { level, .. } => {
+                self.ctx.rp.ctrs[21] += 1;
                 if flag == Check {
                     self.rp_check_level(level);
                 }
@@ -1995,6 +2006,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 self.ctx.mk_sort(l2)
             }
             Const { name, levels, .. } => {
+                self.ctx.rp.ctrs[22] += 1;
                 if !self.env.has_temp_ext() {
                     if let Some(&r) = self.ctx.rp.g_inst_ty.get(&c.e) {
                         if flag == Check {
