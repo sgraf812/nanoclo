@@ -277,9 +277,9 @@ pub struct TcCtx<'t, 'p> {
     pub(crate) expr_cache: ExprCache<'t>,
     /// The rapier delayed-instantiation core's state (interned environments,
     /// per-declaration caches, and per-thread global caches); see
-    /// `closure.rs`. Lives here so that it can persist for the lifetime
+    /// `rapier_core.rs`. Lives here so that it can persist for the lifetime
     /// of the context (one context per checking thread).
-    pub(crate) rp: crate::closure::RapierSt<'t>,
+    pub(crate) rp: crate::rapier_core::RapierSt<'t>,
 }
 
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
@@ -290,7 +290,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             dbj_level_counter: 0u32,
             unique_counter: 0u32,
             expr_cache: ExprCache::new(),
-            rp: crate::closure::RapierSt::new(),
+            rp: crate::rapier_core::RapierSt::new(),
         }
     }
 

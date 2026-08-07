@@ -14,7 +14,7 @@ pub mod name;
 pub mod parser;
 pub mod pretty_printer;
 pub mod quot;
-pub mod closure;
+pub mod rapier_core;
 pub mod tc;
 #[cfg(test)]
 mod tests;

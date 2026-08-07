@@ -1,4 +1,4 @@
-//! Terms in flight, as closures over an interned environment.
+//! The rapier delayed-instantiation core over nanoda's arena.
 //!
 //! Terms in flight are closures `(ExprPtr, EnvId)`; entering a binder extends
 //! an interned environment in O(1); whnf and def-eq run on spined closures;

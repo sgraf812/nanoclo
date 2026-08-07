@@ -1,4 +1,4 @@
-use crate::closure::{
+use crate::rapier_core::{
     clo_le, Clo, Entry, EnvId, SClo, SpineVec, ENV_NIL,
 };
 use crate::env::{Declar, DeclarInfo, Env, ReducibilityHint};
@@ -275,9 +275,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
 
-    /// Delegates to the rapier delayed-instantiation core (`closure.rs`).
+    /// Delegates to the rapier delayed-instantiation core (`rapier_core.rs`).
     pub(crate) fn infer(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
-        self.rp_infer(crate::closure::Clo::of(e), flag)
+        self.rp_infer(crate::rapier_core::Clo::of(e), flag)
     }
 
 
@@ -312,9 +312,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     
     // Not well tested, used for introspection/debugging.
 
-    /// Delegates to the rapier delayed-instantiation core (`closure.rs`).
+    /// Delegates to the rapier delayed-instantiation core (`rapier_core.rs`).
     pub fn whnf(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
-        let s = self.rp_whnf_clo(crate::closure::Clo::of(e));
+        let s = self.rp_whnf_clo(crate::rapier_core::Clo::of(e));
         let out = self.rp_sclo_to_expr(&s);
         // mirror upstream whnf: sort levels come out simplified
         if let Sort { level, .. } = self.ctx.read_expr(out) {
@@ -336,9 +336,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     pub fn assert_def_eq(&mut self, u: ExprPtr<'t>, v: ExprPtr<'t>) { assert!(self.def_eq(u, v)) }
 
-    /// Delegates to the rapier delayed-instantiation core (`closure.rs`).
+    /// Delegates to the rapier delayed-instantiation core (`rapier_core.rs`).
     pub fn def_eq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        self.rp_is_def_eq(crate::closure::Clo::of(x), crate::closure::Clo::of(y))
+        self.rp_is_def_eq(crate::rapier_core::Clo::of(x), crate::rapier_core::Clo::of(y))
     }
 
 
