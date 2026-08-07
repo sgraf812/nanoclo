@@ -30,7 +30,7 @@ fn use_config(config_path: &Path) -> Result<Option<String>, Box<dyn Error>> {
     // Check the environment
     export_file.check_all_declars();
     if std::env::var("RAPIER_CTRS").is_ok() {
-        eprintln!("CTRS {}", nanoda_lib::rapier_core::ctrs_report());
+        eprintln!("CTRS {}", nanoda_lib::closure::ctrs_report());
     }
     // Pretty print as necessary
     let pp_errs = export_file.pp_selected_declars(pp_destination.as_mut());
