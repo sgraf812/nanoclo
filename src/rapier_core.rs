@@ -1635,10 +1635,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         }
                     }
                     (
-                        Proj { idx: i1, structure: e1, .. },
-                        Proj { idx: i2, structure: e2, .. },
+                        Proj { ty_name: n1, idx: i1, structure: e1, .. },
+                        Proj { ty_name: n2, idx: i2, structure: e2, .. },
                     ) => {
-                        if i1 == i2
+                        if n1 == n2
+                            && i1 == i2
                             && self.rp_is_def_eq(
                                 Clo { e: e1, env: tn.head.env },
                                 Clo { e: e2, env: sn.head.env },
@@ -2107,6 +2108,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.rp_is_def_eq(ty_clo, Clo::of(s_ty))
     }
 
+    /// Could `ty` be a proposition? A universe parameter stands for a level
+    /// that an instantiation may send to zero, so it counts.
+    fn rp_may_be_prop(&mut self, ty: ExprPtr<'t>) -> bool {
+        let sort = self.rp_infer(Clo::of(ty), InferOnly);
+        let w = self.rp_whnf_clo(Clo::of(sort));
+        w.spine.is_empty()
+            && match self.ctx.read_expr(w.head.e) {
+                Sort { level, .. } => self.ctx.may_be_prop(level),
+                _ => false,
+            }
+    }
+
     /// Is `ty` a proposition, i.e. `ty : Prop`?
     fn rp_is_prop(&mut self, ty: ExprPtr<'t>) -> bool {
         let sort = self.rp_infer(Clo::of(ty), InferOnly);
@@ -2403,7 +2416,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let env2 = self.rp_push_entry(rw.head.env, Entry::Val(p.e, p.env));
             r = Clo { e: body, env: env2 };
         }
-        let is_prop_ty = self.rp_is_prop(s_ty);
+        let is_prop_ty = self.rp_may_be_prop(s_ty);
         for fi in 0..idx {
             let rw = self.rp_whnf_clo(r);
             let Pi { binder_type: dom, body, .. } = self.ctx.read_expr(rw.head.e) else {
@@ -2412,7 +2425,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             assert!(rw.spine.is_empty(), "invalid projection");
             if self.lbr(body) > 0 && is_prop_ty {
                 let d = self.rp_reify(Clo { e: dom, env: rw.head.env });
-                assert!(self.rp_is_prop(d), "invalid projection");
+                assert!(self.rp_is_prop(d), "infer_proj prop");
             }
             let bv = self.ctx.mk_var(0);
             let proj = self.ctx.mk_proj(i_name, fi, bv);
@@ -2427,7 +2440,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         assert!(rw.spine.is_empty(), "invalid projection");
         if is_prop_ty {
             let d = self.rp_reify(Clo { e: dom, env: rw.head.env });
-            assert!(self.rp_is_prop(d), "invalid projection");
+            assert!(self.rp_is_prop(d), "infer_proj prop");
         }
         self.rp_reify(Clo { e: dom, env: rw.head.env })
     }

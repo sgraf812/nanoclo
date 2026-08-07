@@ -1,6 +1,5 @@
 use crate::env::{Declar, DeclarInfo, Env};
 use crate::expr::Expr;
-use crate::level::Level;
 use crate::util::{
     ExportFile, ExprPtr, LevelPtr, NamePtr, TcCtx
 };
@@ -357,21 +356,25 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
 
 
-    pub fn is_sort_zero(&mut self, e: ExprPtr<'t>) -> bool {
-        let e = self.whnf(e);
-        match self.ctx.read_expr(e) {
-            Sort { level, .. } => self.ctx.read_level(level) == Level::Zero,
-            _ => false,
+    pub fn is_prop(&mut self, e: ExprPtr<'t>) -> (bool, ExprPtr<'t>) {
+        let ty = self.infer_then_whnf(e, InferOnly);
+        match self.ctx.read_expr(ty) {
+            Sort { level, .. } => (self.ctx.is_zero(level), ty),
+            _ => (false, ty),
         }
     }
-    pub fn is_proposition(&mut self, e: ExprPtr<'t>) -> (bool, ExprPtr<'t>) {
-        let infd = self.infer(e, InferOnly);
-        (self.is_sort_zero(infd), infd)
+
+    pub fn may_be_prop(&mut self, e: ExprPtr<'t>) -> (bool, ExprPtr<'t>) {
+        let ty = self.infer_then_whnf(e, InferOnly);
+        match self.ctx.read_expr(ty) {
+            Sort { level, .. } => (self.ctx.may_be_prop(level), ty),
+            _ => (false, ty),
+        }
     }
 
     pub fn is_proof(&mut self, e: ExprPtr<'t>) -> (bool, ExprPtr<'t>) {
         let infd = self.infer(e, InferOnly);
-        (self.is_proposition(infd).0, infd)
+        (self.is_prop(infd).0, infd)
     }
 
 
