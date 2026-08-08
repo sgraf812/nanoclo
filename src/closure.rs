@@ -307,14 +307,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     // ---- environments ----
 
-    pub(crate) fn nc_env_len(&self, env: EnvId) -> u32 { self.ctx.rp.envs[env as usize].len }
+    pub(crate) fn env_len(&self, env: EnvId) -> u32 { self.ctx.rp.envs[env as usize].len }
 
-    pub(crate) fn nc_env_next_level(&self, env: EnvId) -> u32 { self.ctx.rp.envs[env as usize].next_level }
+    pub(crate) fn env_next_level(&self, env: EnvId) -> u32 { self.ctx.rp.envs[env as usize].next_level }
 
     /// One past the highest de Bruijn level carried by a free variable in
     /// `e`. Free variables reach an expression only from the context it was
     /// built in, so this is bounded by the depth of that context.
-    pub(crate) fn nc_max_level(&mut self, e: ExprPtr<'t>) -> u32 {
+    pub(crate) fn max_level(&mut self, e: ExprPtr<'t>) -> u32 {
         if !self.ctx.has_fvars(e) {
             return 0;
         }
@@ -323,18 +323,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let r = match self.ctx.read_expr(e) {
             Local { id: crate::expr::FVarId::DbjLevel(l), binder_type, .. } => {
-                self.nc_max_level(binder_type).max(l + 1)
+                self.max_level(binder_type).max(l + 1)
             }
-            Local { binder_type, .. } => self.nc_max_level(binder_type),
-            App { fun, arg, .. } => self.nc_max_level(fun).max(self.nc_max_level(arg)),
+            Local { binder_type, .. } => self.max_level(binder_type),
+            App { fun, arg, .. } => self.max_level(fun).max(self.max_level(arg)),
             Lambda { binder_type, body, .. } | Pi { binder_type, body, .. } => {
-                self.nc_max_level(binder_type).max(self.nc_max_level(body))
+                self.max_level(binder_type).max(self.max_level(body))
             }
             Let { binder_type, val, body, .. } => self
-                .nc_max_level(binder_type)
-                .max(self.nc_max_level(val))
-                .max(self.nc_max_level(body)),
-            Proj { structure, .. } => self.nc_max_level(structure),
+                .max_level(binder_type)
+                .max(self.max_level(val))
+                .max(self.max_level(body)),
+            Proj { structure, .. } => self.max_level(structure),
             _ => 0,
         };
         self.ctx.rp.lvl_cache.insert(e, r);
@@ -344,11 +344,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// The de Bruijn level to give a binder opened inside the closure
     /// `(e, env)`: one past every level reachable from it, so the variable
     /// that names that binder cannot be confused with one already in scope.
-    pub(crate) fn nc_next_level(&mut self, e: ExprPtr<'t>, env: EnvId) -> u32 {
-        self.nc_max_level(e).max(self.nc_env_next_level(env))
+    pub(crate) fn next_level(&mut self, e: ExprPtr<'t>, env: EnvId) -> u32 {
+        self.max_level(e).max(self.env_next_level(env))
     }
 
-    pub(crate) fn nc_push_entry(&mut self, env: EnvId, entry: Entry<'t>) -> EnvId {
+    pub(crate) fn push_entry(&mut self, env: EnvId, entry: Entry<'t>) -> EnvId {
         self.ctx.rp.ctrs[10] += 1;
         // The entry is part of the identity of every environment built on
         // top of it, so it enters in normal form: a value that reads nothing
@@ -358,7 +358,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // and splits every cache keyed on them.
         let entry = match entry {
             Entry::Val(e, venv) if venv != ENV_NIL => {
-                match self.nc_norm_clo(Clo { e, env: venv }) {
+                match self.norm_clo(Clo { e, env: venv }) {
                     Clo { e, env } => Entry::Val(e, env),
                 }
             }
@@ -368,13 +368,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Some(&id) = self.ctx.rp.env_intern.get(&key) {
             return id;
         }
-        let len = self.nc_env_len(env) + 1;
+        let len = self.env_len(env) + 1;
         let next_level = {
-            let parent = self.nc_env_next_level(env);
+            let parent = self.env_next_level(env);
             match entry {
-                Entry::Neu(fv) => parent.max(self.nc_max_level(fv)),
+                Entry::Neu(fv) => parent.max(self.max_level(fv)),
                 Entry::Val(e, venv) => {
-                    parent.max(self.nc_max_level(e)).max(self.nc_env_next_level(venv))
+                    parent.max(self.max_level(e)).max(self.env_next_level(venv))
                 }
             }
         };
@@ -395,7 +395,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Which loose bvar indices `e` reads. Union at an application is a
     /// bitwise or and passing a binder is a shift, both constant time, and a
     /// set covering everything below the range needs no representation.
-    pub(crate) fn nc_uses_mask(&mut self, e: ExprPtr<'t>) -> Uses {
+    pub(crate) fn uses_mask(&mut self, e: ExprPtr<'t>) -> Uses {
         let n = self.ctx.read_expr(e);
         let lbr = n.num_loose_bvars();
         if lbr == 0 {
@@ -420,22 +420,22 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             Var { dbj_idx, .. } if dbj_idx < 64 => Uses::Mask(1u64 << dbj_idx),
             Var { .. } => Uses::Wide,
             App { fun, arg, .. } => {
-                let a = self.nc_uses_mask(fun);
-                let b = self.nc_uses_mask(arg);
+                let a = self.uses_mask(fun);
+                let b = self.uses_mask(arg);
                 join(a, b)
             }
             Lambda { binder_type, body, .. } | Pi { binder_type, body, .. } => {
-                let d = self.nc_uses_mask(binder_type);
-                let b = self.nc_uses_mask(body);
+                let d = self.uses_mask(binder_type);
+                let b = self.uses_mask(body);
                 join(d, under(b))
             }
             Let { binder_type, val, body, .. } => {
-                let t = self.nc_uses_mask(binder_type);
-                let v = self.nc_uses_mask(val);
-                let b = self.nc_uses_mask(body);
+                let t = self.uses_mask(binder_type);
+                let v = self.uses_mask(val);
+                let b = self.uses_mask(body);
                 join(join(t, v), under(b))
             }
-            Proj { structure, .. } => self.nc_uses_mask(structure),
+            Proj { structure, .. } => self.uses_mask(structure),
             _ => Uses::Mask(0),
         };
         let u = match u {
@@ -447,8 +447,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     /// entry for de Bruijn index `i` (0 = innermost)
-    pub(crate) fn nc_lookup(&self, env: EnvId, i: u16) -> Entry<'t> {
-        let len = self.nc_env_len(env);
+    pub(crate) fn lookup(&self, env: EnvId, i: u16) -> Entry<'t> {
+        let len = self.env_len(env);
         assert!(
             (i as u32) < len,
             "loose bvar: index {} in environment of length {} (env id {})",
@@ -480,15 +480,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// instead of being fresh every time. The binder type is part of the
     /// variable's identity, so a level shared by two binders of different
     /// types still gives two variables.
-    pub(crate) fn nc_fvar_at(&mut self, level: u32, ty: ExprPtr<'t>) -> ExprPtr<'t> {
+    pub(crate) fn fvar_at(&mut self, level: u32, ty: ExprPtr<'t>) -> ExprPtr<'t> {
         let anon = self.ctx.anonymous();
         self.ctx.remake_dbj_level(anon, BinderStyle::Default, ty, level)
     }
 
-    pub(crate) fn nc_fvar_type(&self, fv: ExprPtr<'t>) -> ExprPtr<'t> {
+    pub(crate) fn fvar_type(&self, fv: ExprPtr<'t>) -> ExprPtr<'t> {
         match self.ctx.read_expr(fv) {
             Local { binder_type, .. } => binder_type,
-            _ => unreachable!("nc_fvar_type on non-Local"),
+            _ => unreachable!("fvar_type on non-Local"),
         }
     }
 
@@ -496,7 +496,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// no temporary environment extension is active (temporary declarations
     /// must not leak into per-thread state)
     #[inline]
-    pub(crate) fn nc_global_key(&self, c: Clo<'t>) -> Option<ExprPtr<'t>> {
+    pub(crate) fn global_key(&self, c: Clo<'t>) -> Option<ExprPtr<'t>> {
         if c.env == ENV_NIL && !self.ctx.has_fvars(c.e) && !self.env.has_temp_ext() {
             Some(c.e)
         } else {
@@ -508,14 +508,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// the bindings that expression reads. Everything else in the environment
     /// is invisible to it, so closures differing only there ask the same
     /// question and share one answer.
-    pub(crate) fn nc_key(&mut self, c: Clo<'t>) -> Clo<'t> {
+    pub(crate) fn key(&mut self, c: Clo<'t>) -> Clo<'t> {
         if c.env == ENV_NIL {
             return c;
         }
         if proj_off() {
             return if self.lbr(c.e) == 0 { Clo::of(c.e) } else { c };
         }
-        let mask = match self.nc_uses_mask(c.e) {
+        let mask = match self.uses_mask(c.e) {
             Uses::Mask(0) => return Clo::of(c.e),
             Uses::Mask(m) => m,
             Uses::Dense | Uses::Wide => return c,
@@ -546,7 +546,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let i = m.trailing_zeros() as usize;
             m &= m - 1;
             let entry = picked[i].expect("projection: index outside the environment");
-            proj = self.nc_push_entry(proj, entry);
+            proj = self.push_entry(proj, entry);
         }
         self.ctx.rp.proj_cache.insert((mask, c.env), proj);
         Clo { e: c.e, env: proj }
@@ -555,11 +555,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// The environment `e` reads through, when `e` sits under `off` binders
     /// entered since the comparison began: its own indices at or above `off`
     /// name environment positions `i - off`.
-    pub(crate) fn nc_proj_at(&mut self, e: ExprPtr<'t>, env: EnvId, off: u16) -> EnvId {
+    pub(crate) fn proj_at(&mut self, e: ExprPtr<'t>, env: EnvId, off: u16) -> EnvId {
         if env == ENV_NIL {
             return env;
         }
-        let mask = match self.nc_uses_mask(e) {
+        let mask = match self.uses_mask(e) {
             Uses::Mask(m) if off < 64 => m >> off,
             Uses::Mask(_) => 0,
             Uses::Dense | Uses::Wide => return env,
@@ -591,7 +591,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let i = m.trailing_zeros() as usize;
             m &= m - 1;
             let Some(entry) = picked[i] else { return env };
-            proj = self.nc_push_entry(proj, entry);
+            proj = self.push_entry(proj, entry);
         }
         self.ctx.rp.proj_cache.insert((mask, env), proj);
         proj
@@ -599,10 +599,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Cache-key normalization: resolve bvar heads to the entry they denote;
     /// a closed result drops its environment.
-    pub(crate) fn nc_norm_clo(&mut self, c: Clo<'t>) -> Clo<'t> {
+    pub(crate) fn norm_clo(&mut self, c: Clo<'t>) -> Clo<'t> {
         let n = self.ctx.read_expr(c.e);
         let (c, lbr) = if matches!(n, Var { .. }) {
-            let (e2, env2) = self.nc_chase(c.e, c.env);
+            let (e2, env2) = self.chase(c.e, c.env);
             (Clo { e: e2, env: env2 }, self.lbr(e2))
         } else {
             (c, n.num_loose_bvars())
@@ -615,14 +615,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     // ---- reify ----
 
-    pub(crate) fn nc_reify(&mut self, c: Clo<'t>) -> ExprPtr<'t> {
+    pub(crate) fn reify(&mut self, c: Clo<'t>) -> ExprPtr<'t> {
         if c.env == ENV_NIL || self.lbr(c.e) == 0 {
             return c.e;
         }
-        self.nc_reify_go(c.env, 0, c.e)
+        self.reify_go(c.env, 0, c.e)
     }
 
-    pub(crate) fn nc_reify_go(&mut self, env: EnvId, offset: u16, e: ExprPtr<'t>) -> ExprPtr<'t> {
+    pub(crate) fn reify_go(&mut self, env: EnvId, offset: u16, e: ExprPtr<'t>) -> ExprPtr<'t> {
         let n = self.ctx.read_expr(e);
         if n.num_loose_bvars() <= offset {
             return e;
@@ -632,39 +632,39 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return r;
         }
         let r = match n {
-            Var { dbj_idx, .. } => match self.nc_lookup(env, dbj_idx - offset) {
+            Var { dbj_idx, .. } => match self.lookup(env, dbj_idx - offset) {
                 Entry::Neu(fv) => fv,
                 Entry::Val(e2, env2) => {
                     if env2 == ENV_NIL {
                         e2
                     } else {
-                        self.nc_reify(Clo { e: e2, env: env2 })
+                        self.reify(Clo { e: e2, env: env2 })
                     }
                 }
             },
             App { fun, arg, .. } => {
-                let f2 = self.nc_reify_go(env, offset, fun);
-                let x2 = self.nc_reify_go(env, offset, arg);
+                let f2 = self.reify_go(env, offset, fun);
+                let x2 = self.reify_go(env, offset, arg);
                 self.ctx.mk_app(f2, x2)
             }
             Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                let d2 = self.nc_reify_go(env, offset, binder_type);
-                let b2 = self.nc_reify_go(env, offset + 1, body);
+                let d2 = self.reify_go(env, offset, binder_type);
+                let b2 = self.reify_go(env, offset + 1, body);
                 self.ctx.mk_lambda(binder_name, binder_style, d2, b2)
             }
             Pi { binder_name, binder_style, binder_type, body, .. } => {
-                let d2 = self.nc_reify_go(env, offset, binder_type);
-                let b2 = self.nc_reify_go(env, offset + 1, body);
+                let d2 = self.reify_go(env, offset, binder_type);
+                let b2 = self.reify_go(env, offset + 1, body);
                 self.ctx.mk_pi(binder_name, binder_style, d2, b2)
             }
             Let { binder_name, binder_type, val, body, nondep, .. } => {
-                let t2 = self.nc_reify_go(env, offset, binder_type);
-                let v2 = self.nc_reify_go(env, offset, val);
-                let b2 = self.nc_reify_go(env, offset + 1, body);
+                let t2 = self.reify_go(env, offset, binder_type);
+                let v2 = self.reify_go(env, offset, val);
+                let b2 = self.reify_go(env, offset + 1, body);
                 self.ctx.mk_let(binder_name, t2, v2, b2, nondep)
             }
             Proj { ty_name, idx, structure, .. } => {
-                let x2 = self.nc_reify_go(env, offset, structure);
+                let x2 = self.reify_go(env, offset, structure);
                 self.ctx.mk_proj(ty_name, idx, x2)
             }
             _ => e,
@@ -675,11 +675,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     // ---- eqMod: structural equality modulo substitution ----
 
-    pub(crate) fn nc_clo_eq(&mut self, t: Clo<'t>, s: Clo<'t>) -> bool {
-        self.nc_eq_mod(t.e, t.env, 0, s.e, s.env, 0)
+    pub(crate) fn clo_eq(&mut self, t: Clo<'t>, s: Clo<'t>) -> bool {
+        self.eq_mod(t.e, t.env, 0, s.e, s.env, 0)
     }
 
-    pub(crate) fn nc_eq_mod(
+    pub(crate) fn eq_mod(
         &mut self,
         ae: ExprPtr<'t>,
         aenv: EnvId,
@@ -693,9 +693,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let an = self.ctx.read_expr(ae);
         if let Var { dbj_idx: i, .. } = an {
             if i >= aoff {
-                return match self.nc_lookup(aenv, i - aoff) {
-                    Entry::Val(e2, env2) => self.nc_eq_mod(e2, env2, 0, be, benv, boff),
-                    Entry::Neu(fv) => self.nc_eq_mod_neu(fv, be, benv, boff),
+                return match self.lookup(aenv, i - aoff) {
+                    Entry::Val(e2, env2) => self.eq_mod(e2, env2, 0, be, benv, boff),
+                    Entry::Neu(fv) => self.eq_mod_neu(fv, be, benv, boff),
                 };
             }
         }
@@ -703,9 +703,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let bn = self.ctx.read_expr(be);
         if let Var { dbj_idx: j, .. } = bn {
             if j >= boff {
-                return match self.nc_lookup(benv, j - boff) {
-                    Entry::Val(e2, env2) => self.nc_eq_mod(ae, aenv, aoff, e2, env2, 0),
-                    Entry::Neu(fv) => self.nc_eq_mod_neu(fv, ae, aenv, aoff),
+                return match self.lookup(benv, j - boff) {
+                    Entry::Val(e2, env2) => self.eq_mod(ae, aenv, aoff, e2, env2, 0),
+                    Entry::Neu(fv) => self.eq_mod_neu(fv, ae, aenv, aoff),
                 };
             }
         }
@@ -736,9 +736,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // are ordered canonically and each question is stored once.
         let blbr = bn.num_loose_bvars();
         let (ka_env, ka_off) =
-            if albr <= aoff { (ENV_NIL, 0u16) } else { (self.nc_proj_at(ae, aenv, aoff), aoff) };
+            if albr <= aoff { (ENV_NIL, 0u16) } else { (self.proj_at(ae, aenv, aoff), aoff) };
         let (kb_env, kb_off) =
-            if blbr <= boff { (ENV_NIL, 0u16) } else { (self.nc_proj_at(be, benv, boff), boff) };
+            if blbr <= boff { (ENV_NIL, 0u16) } else { (self.proj_at(be, benv, boff), boff) };
         let ka = (ka_env as u64) << 32 | ae.get_hash();
         let kb = (kb_env as u64) << 32 | be.get_hash();
         let memo_key = if ka <= kb {
@@ -765,29 +765,29 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             (NatLit { ptr: v1, .. }, NatLit { ptr: v2, .. }) => v1 == v2,
             (StringLit { ptr: s1, .. }, StringLit { ptr: s2, .. }) => s1 == s2,
             (App { fun: f1, arg: a1, .. }, App { fun: f2, arg: a2, .. }) => {
-                self.nc_eq_mod(f1, aenv, aoff, f2, benv, boff)
-                    && self.nc_eq_mod(a1, aenv, aoff, a2, benv, boff)
+                self.eq_mod(f1, aenv, aoff, f2, benv, boff)
+                    && self.eq_mod(a1, aenv, aoff, a2, benv, boff)
             }
             (
                 Lambda { binder_type: d1, body: b1, .. },
                 Lambda { binder_type: d2, body: b2, .. },
             )
             | (Pi { binder_type: d1, body: b1, .. }, Pi { binder_type: d2, body: b2, .. }) => {
-                self.nc_eq_mod(d1, aenv, aoff, d2, benv, boff)
-                    && self.nc_eq_mod(b1, aenv, aoff + 1, b2, benv, boff + 1)
+                self.eq_mod(d1, aenv, aoff, d2, benv, boff)
+                    && self.eq_mod(b1, aenv, aoff + 1, b2, benv, boff + 1)
             }
             (
                 Let { binder_type: t1, val: v1, body: b1, .. },
                 Let { binder_type: t2, val: v2, body: b2, .. },
             ) => {
-                self.nc_eq_mod(t1, aenv, aoff, t2, benv, boff)
-                    && self.nc_eq_mod(v1, aenv, aoff, v2, benv, boff)
-                    && self.nc_eq_mod(b1, aenv, aoff + 1, b2, benv, boff + 1)
+                self.eq_mod(t1, aenv, aoff, t2, benv, boff)
+                    && self.eq_mod(v1, aenv, aoff, v2, benv, boff)
+                    && self.eq_mod(b1, aenv, aoff + 1, b2, benv, boff + 1)
             }
             (
                 Proj { ty_name: n1, idx: i1, structure: e1, .. },
                 Proj { ty_name: n2, idx: i2, structure: e2, .. },
-            ) => n1 == n2 && i1 == i2 && self.nc_eq_mod(e1, aenv, aoff, e2, benv, boff),
+            ) => n1 == n2 && i1 == i2 && self.eq_mod(e1, aenv, aoff, e2, benv, boff),
             _ => false,
         };
         if composite {
@@ -797,11 +797,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     /// Does the closure `(e, env, off)` denote exactly the free variable `fv`?
-    pub(crate) fn nc_eq_mod_neu(&mut self, fv: ExprPtr<'t>, e: ExprPtr<'t>, env: EnvId, off: u16) -> bool {
+    pub(crate) fn eq_mod_neu(&mut self, fv: ExprPtr<'t>, e: ExprPtr<'t>, env: EnvId, off: u16) -> bool {
         if let Var { dbj_idx: j, .. } = self.ctx.read_expr(e) {
             if j >= off {
-                return match self.nc_lookup(env, j - off) {
-                    Entry::Val(e2, env2) => self.nc_eq_mod_neu(fv, e2, env2, 0),
+                return match self.lookup(env, j - off) {
+                    Entry::Val(e2, env2) => self.eq_mod_neu(fv, e2, env2, 0),
                     Entry::Neu(g) => fv == g,
                 };
             }
@@ -810,12 +810,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         e == fv
     }
 
-    pub(crate) fn nc_s_quick_eq(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> bool {
-        if !self.nc_clo_eq(t.head, s.head) || t.spine.len() != s.spine.len() {
+    pub(crate) fn s_quick_eq(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> bool {
+        if !self.clo_eq(t.head, s.head) || t.spine.len() != s.spine.len() {
             return false;
         }
         for (&x, &y) in t.spine.iter().zip(s.spine.iter()) {
-            if !self.nc_clo_eq(x, y) {
+            if !self.clo_eq(x, y) {
                 return false;
             }
         }
@@ -824,7 +824,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Follow bvar -> Val chains to their base. Neu entries resolve to the
     /// fvar expr. Returns the input unchanged only for non-bvar heads.
-    pub(crate) fn nc_chase(&mut self, e0: ExprPtr<'t>, env0: EnvId) -> (ExprPtr<'t>, EnvId) {
+    pub(crate) fn chase(&mut self, e0: ExprPtr<'t>, env0: EnvId) -> (ExprPtr<'t>, EnvId) {
         let mut e = e0;
         let mut env = env0;
         loop {
@@ -832,7 +832,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 Var { dbj_idx, .. } => dbj_idx,
                 _ => break,
             };
-            match self.nc_lookup(env, i) {
+            match self.lookup(env, i) {
                 Entry::Neu(fv) => {
                     e = fv;
                     env = ENV_NIL;
