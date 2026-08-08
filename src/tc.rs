@@ -283,36 +283,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
 
 
-    //fn infer_app(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
-    //    match self.ctx.read_expr(e) {
-    //        App {fun, arg, ..} => {
-    //            let fun_ty = self.infer_then_whnf(fun, flag);
-    //            match self.ctx.read_expr(fun_ty) {
-    //                Pi {binder_type, body, ..} => {
-    //                    if flag == InferFlag::Check {
-    //                        let arg_ty = self.infer(arg, flag);
-    //                        let outer_scope_eager_setting = self.ctx.eager_mode;
-    //                        if self.ctx.is_eager_reduce_app(arg) {
-    //                            self.ctx.eager_mode = true;
-    //                        }
-    //                        self.assert_def_eq(binder_type, arg_ty);
-    //                        self.ctx.eager_mode = outer_scope_eager_setting;
-    //                    }
-    //                    self.ctx.inst(body, &[arg])
-    //                },
-    //                _ => panic!()
-    //            }
-    //        },
-    //        _ => panic!()
-    //    }
-    //}
-
-
-
-    
-    // Not well tested, used for introspection/debugging.
-
-    /// Delegates to the delayed-instantiation core (`closure.rs`).
     pub fn whnf(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
         let s = self.nc_whnf_clo(crate::closure::Clo::of(e));
         let out = self.nc_sclo_to_expr(&s);
@@ -347,33 +317,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     
 
-    pub fn reduce_quot(&mut self, c_name: NamePtr<'t>, args: &[ExprPtr<'t>]) -> Option<ExprPtr<'t>> {
-        if !matches!(self.env.get_declar(&c_name), Some(Declar::Quot {..})) {
-            return None
-        }
-        let (qmk, rest_idx) = if c_name == self.ctx.export_file.name_cache.quot_lift? {
-            let qmk = args.get(5).copied()?;
-            (self.whnf(qmk), 6)
-        } else if c_name == self.ctx.export_file.name_cache.quot_ind? {
-            let qmk = args.get(4).copied()?;
-            (self.whnf(qmk), 5)
-        } else {
-            return None
-        };
-        {
-            let (qmk_const, qmk_args) = self.ctx.unfold_apps(qmk);
-            match self.ctx.read_expr(qmk_const) {
-                Const { name, .. } if name == self.ctx.export_file.name_cache.quot_mk? && qmk_args.len() == 3 => (),
-                _ => return None,
-            };
-        }
-        let f = args.get(3).copied()?;
-        let appd = match self.ctx.read_expr(qmk) {
-            App { arg, .. } => self.ctx.mk_app(f, arg),
-            _ => panic!("Quot iota"),
-        };
-        Some(self.ctx.foldl_apps(appd, args.iter().copied().skip(rest_idx)))
-    }
 
     // We only need the name and reducibility from this.
 
@@ -387,6 +330,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
 
 
+    /// Whether the type of `e` is a proposition.
+    fn is_prop_of(&mut self, e: ExprPtr<'t>) -> bool { self.is_prop(e).0 }
+
     pub fn is_prop(&mut self, e: ExprPtr<'t>) -> (bool, ExprPtr<'t>) {
         let ty = self.infer_then_whnf(e, InferOnly);
         match self.ctx.read_expr(ty) {
@@ -395,13 +341,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    pub fn may_be_prop(&mut self, e: ExprPtr<'t>) -> (bool, ExprPtr<'t>) {
-        let ty = self.infer_then_whnf(e, InferOnly);
-        match self.ctx.read_expr(ty) {
-            Sort { level, .. } => (self.ctx.may_be_prop(level), ty),
-            _ => (false, ty),
-        }
-    }
 
     pub fn is_proof(&mut self, e: ExprPtr<'t>) -> (bool, ExprPtr<'t>) {
         let infd = self.infer(e, InferOnly);
@@ -1169,7 +1108,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         // proof irrelevance
         let t_ty = self.nc_infer_s(&tn, InferOnly);
-        if self.nc_is_prop(t_ty) {
+        if self.is_prop_of(t_ty) {
             let s_ty = self.nc_infer_s(&sn, InferOnly);
             if self.nc_is_def_eq(Clo::of(t_ty), Clo::of(s_ty)) {
                 return true;
@@ -1674,7 +1613,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Could `ty` be a proposition? A universe parameter stands for a level
     /// that an instantiation may send to zero, so it counts.
-    fn nc_may_be_prop(&mut self, ty: ExprPtr<'t>) -> bool {
+    fn may_be_prop_of(&mut self, ty: ExprPtr<'t>) -> bool {
         let sort = self.nc_infer(Clo::of(ty), InferOnly);
         let w = self.nc_whnf_clo(Clo::of(sort));
         w.spine.is_empty()
@@ -1684,16 +1623,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
     }
 
-    /// Is `ty` a proposition, i.e. `ty : Prop`?
-    fn nc_is_prop(&mut self, ty: ExprPtr<'t>) -> bool {
-        let sort = self.nc_infer(Clo::of(ty), InferOnly);
-        let w = self.nc_whnf_clo(Clo::of(sort));
-        w.spine.is_empty()
-            && match self.ctx.read_expr(w.head.e) {
-                Sort { level, .. } => self.ctx.is_zero(level),
-                _ => false,
-            }
-    }
 
     // ---- inference ----
 
@@ -1822,18 +1751,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.ctx.subst_declar_info_levels(info, levels)
     }
 
-    fn nc_ensure_sort(&mut self, ty: ExprPtr<'t>) -> LevelPtr<'t> {
-        if let Sort { level, .. } = self.ctx.read_expr(ty) {
-            return level;
-        }
-        let w = self.nc_whnf_clo(Clo::of(ty));
-        if w.spine.is_empty() {
-            if let Sort { level, .. } = self.ctx.read_expr(w.head.e) {
-                return level;
-            }
-        }
-        panic!("type expected")
-    }
 
     fn nc_infer_lambda(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
         // The whole run of binders is opened before the body is inferred, so
@@ -1849,7 +1766,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let d = self.nc_reify(Clo { e: binder_type, env });
             if flag == Check {
                 let dty = self.nc_infer(Clo::of(d), flag);
-                self.nc_ensure_sort(dty);
+                self.ensure_sort(dty);
             }
             let level = self.nc_next_level(e, env).max(self.nc_max_level(d));
             if binders.is_empty() {
@@ -1878,12 +1795,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         };
         let d = self.nc_reify(Clo { e: binder_type, env: c.env });
         let dty = self.nc_infer(Clo::of(d), flag);
-        let u = self.nc_ensure_sort(dty);
+        let u = self.ensure_sort(dty);
         let level = self.nc_next_level(c.e, c.env).max(self.nc_max_level(d));
         let fv = self.nc_fvar_at(level, d);
         let env2 = self.nc_push_entry(c.env, Entry::Neu(fv));
         let bt = self.nc_infer(Clo { e: body, env: env2 }, flag);
-        let s = self.nc_ensure_sort(bt);
+        let s = self.ensure_sort(bt);
         // mkLevelIMax': imax with immediate simplifications
         let lvl = self.ctx.imax(u, s);
         let lvl = self.ctx.simplify(lvl);
@@ -1898,7 +1815,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let t = self.nc_reify(Clo { e: binder_type, env: c.env });
         if flag == Check {
             let tty = self.nc_infer(Clo::of(t), flag);
-            self.nc_ensure_sort(tty);
+            self.ensure_sort(tty);
             let vty = self.nc_infer(Clo { e: val, env: c.env }, flag);
             assert!(
                 self.nc_is_def_eq(Clo::of(vty), Clo::of(t)),
@@ -1986,7 +1903,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let env2 = self.nc_push_entry(rw.head.env, Entry::Val(p.e, p.env));
             r = Clo { e: body, env: env2 };
         }
-        let is_prop_ty = self.nc_may_be_prop(s_ty);
+        let is_prop_ty = self.may_be_prop_of(s_ty);
         for fi in 0..idx {
             let rw = self.nc_whnf_clo(r);
             let Pi { binder_type: dom, body, .. } = self.ctx.read_expr(rw.head.e) else {
@@ -1995,7 +1912,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             assert!(rw.spine.is_empty(), "invalid projection");
             if self.lbr(body) > 0 && is_prop_ty {
                 let d = self.nc_reify(Clo { e: dom, env: rw.head.env });
-                assert!(self.nc_is_prop(d), "infer_proj prop");
+                assert!(self.is_prop_of(d), "infer_proj prop");
             }
             let bv = self.ctx.mk_var(0);
             let proj = self.ctx.mk_proj(i_name, fi, bv);
@@ -2010,7 +1927,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         assert!(rw.spine.is_empty(), "invalid projection");
         if is_prop_ty {
             let d = self.nc_reify(Clo { e: dom, env: rw.head.env });
-            assert!(self.nc_is_prop(d), "infer_proj prop");
+            assert!(self.is_prop_of(d), "infer_proj prop");
         }
         self.nc_reify(Clo { e: dom, env: rw.head.env })
     }
