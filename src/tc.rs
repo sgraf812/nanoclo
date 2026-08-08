@@ -1132,9 +1132,37 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.rp_is_def_eq_s_core(tn, sn)
     }
 
+    /// A right side of `Bool.true` is settled by evaluating the left one,
+    /// which is what proof by reflection asks for: the argument's inferred
+    /// type is `true = true` and its expected type is `<decision> = true`.
+    /// Evaluation waits for the left side to be free of free variables unless
+    /// the term wrapped the argument in `eagerReduce`, whose whole purpose is
+    /// to ask for it sooner.
+    fn rp_bool_true_by_evaluation(&mut self, tn: &SClo<'t>, sn: &SClo<'t>) -> bool {
+        if !sn.spine.is_empty() {
+            return false;
+        }
+        let Some(bool_true) = self.ctx.export_file.name_cache.bool_true else {
+            return false;
+        };
+        match self.ctx.read_expr(sn.head.e) {
+            Const { name, .. } if name == bool_true => {}
+            _ => return false,
+        }
+        if !self.ctx.eager_mode && self.rp_sclo_has_fvar(tn) {
+            return false;
+        }
+        let w = self.rp_whnf(tn.clone());
+        w.spine.is_empty()
+            && matches!(self.ctx.read_expr(w.head.e), Const { name, .. } if name == bool_true)
+    }
+
     fn rp_is_def_eq_s_core(&mut self, tn: SClo<'t>, sn: SClo<'t>) -> bool {
         if let Some(b) = self.rp_quick_heads(&tn, &sn) {
             return b;
+        }
+        if self.rp_bool_true_by_evaluation(&tn, &sn) {
+            return true;
         }
         if let Some(b) = self.rp_def_eq_offset(&tn, &sn) {
             return b;
@@ -1408,8 +1436,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return Ok(b);
         }
         if (self.rp_nat_op(&tn).is_some() || self.rp_nat_op(&sn).is_some())
-            && !self.rp_sclo_has_fvar(&tn)
-            && !self.rp_sclo_has_fvar(&sn)
+            && (self.ctx.eager_mode
+                || (!self.rp_sclo_has_fvar(&tn) && !self.rp_sclo_has_fvar(&sn)))
         {
             if let Some(t2) = self.rp_reduce_nat(&tn) {
                 return Ok(self.rp_is_def_eq_s(t2, sn));
@@ -1900,10 +1928,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             if flag == Check {
                 let a_ty = self.rp_infer(arg, flag);
-                assert!(
-                    self.rp_is_def_eq(Clo { e: dom, env: fw.head.env }, Clo::of(a_ty)),
-                    "application type mismatch"
-                );
+                // `@eagerReduce A a` in argument position asks for the
+                // comparison to reduce without waiting for both sides to be
+                // free of free variables.
+                let outer_eager = self.ctx.eager_mode;
+                if self.ctx.is_eager_reduce_app(arg.e) {
+                    self.ctx.eager_mode = true;
+                }
+                let ok = self.rp_is_def_eq(Clo { e: dom, env: fw.head.env }, Clo::of(a_ty));
+                self.ctx.eager_mode = outer_eager;
+                assert!(ok, "application type mismatch");
             }
             let env2 = self.rp_push_entry(fw.head.env, Entry::Val(arg.e, arg.env));
             f_ty = Clo { e: body, env: env2 };

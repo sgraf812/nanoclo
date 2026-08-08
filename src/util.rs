@@ -275,6 +275,8 @@ pub struct TcCtx<'t, 'p> {
     pub(crate) unique_counter: u32,
     /// A cache for instantiation, free variable abstraction, and level substitution
     pub(crate) expr_cache: ExprCache<'t>,
+    /// Set while checking an argument the term marks `eagerReduce`.
+    pub(crate) eager_mode: bool,
     /// The rapier delayed-instantiation core's state (interned environments,
     /// per-declaration caches, and per-thread global caches); see
     /// `rapier_core.rs`. Lives here so that it can persist for the lifetime
@@ -290,6 +292,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             dbj_level_counter: 0u32,
             unique_counter: 0u32,
             expr_cache: ExprCache::new(),
+            eager_mode: false,
             rp: crate::rapier_core::RapierSt::new(),
         }
     }
@@ -815,6 +818,7 @@ impl<'a> LeanDag<'a> {
             nat_shl: self.find_name("Nat.shiftLeft"),
             nat_shr: self.find_name("Nat.shiftRight"),
             bool_true: self.find_name("Bool.true"),
+            eager_reduce: self.find_name("eagerReduce"),
             bool_false: self.find_name("Bool.false"),
             char: self.find_name("Char"),
             char_of_nat: self.find_name("Char.ofNat"),
@@ -857,6 +861,7 @@ pub struct NameCache<'p> {
     pub(crate) reduce_nat: Option<NamePtr<'p>>,
     pub(crate) bool_false: Option<NamePtr<'p>>,
     pub(crate) bool_true: Option<NamePtr<'p>>,
+    pub(crate) eager_reduce: Option<NamePtr<'p>>,
     pub(crate) char: Option<NamePtr<'p>>,
     pub(crate) char_of_nat: Option<NamePtr<'p>>,
     #[allow(dead_code)]

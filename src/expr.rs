@@ -580,6 +580,20 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
 
+    /// Whether `e` is an application `@eagerReduce A a`, by which a term
+    /// asks for its argument to be reduced without waiting for the argument
+    /// to be free of free variables.
+    pub(crate) fn is_eager_reduce_app(&self, e: ExprPtr<'t>) -> bool {
+        if let App { fun, .. } = self.read_expr(e) {
+            if let App { fun, .. } = self.read_expr(fun) {
+                if let Const { name, .. } = self.read_expr(fun) {
+                    return self.export_file.name_cache.eager_reduce == Some(name)
+                }
+            }
+        }
+        false
+    }
+
     pub(crate) fn c_bool_true(&mut self) -> Option<ExprPtr<'t>> {
         let n = self.export_file.name_cache.bool_true?;
         let levels = self.alloc_levels_slice(&[]);
