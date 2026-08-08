@@ -920,11 +920,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if i != induct {
             return mj;
         }
-        // not for propositions
+        // A structure whose universe an instantiation may send to zero is
+        // left alone: expanding a proof into its fields would equate proofs
+        // that proof irrelevance already equates on other grounds.
         let tyty = self.rp_infer_s(&e_type, InferOnly);
         let tyty_w = self.rp_whnf_clo(Clo::of(tyty));
         if let Sort { level, .. } = self.ctx.read_expr(tyty_w.head.e) {
-            if tyty_w.spine.is_empty() && self.ctx.is_zero(level) {
+            if tyty_w.spine.is_empty() && self.ctx.may_be_prop(level) {
                 return mj;
             }
         }
