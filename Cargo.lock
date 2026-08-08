@@ -109,7 +109,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nanoda_lib"
+name = "nanoclo"
 version = "0.4.13"
 dependencies = [
  "indexmap",

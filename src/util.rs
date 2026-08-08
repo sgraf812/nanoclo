@@ -277,11 +277,11 @@ pub struct TcCtx<'t, 'p> {
     pub(crate) expr_cache: ExprCache<'t>,
     /// Set while checking an argument the term marks `eagerReduce`.
     pub(crate) eager_mode: bool,
-    /// The rapier delayed-instantiation core's state (interned environments,
+    /// The delayed-instantiation core's state (interned environments,
     /// per-declaration caches, and per-thread global caches); see
-    /// `rapier_core.rs`. Lives here so that it can persist for the lifetime
+    /// `closure.rs`. Lives here so that it can persist for the lifetime
     /// of the context (one context per checking thread).
-    pub(crate) rp: crate::rapier_core::RapierSt<'t>,
+    pub(crate) rp: crate::closure::CloState<'t>,
 }
 
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
@@ -293,7 +293,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             unique_counter: 0u32,
             expr_cache: ExprCache::new(),
             eager_mode: false,
-            rp: crate::rapier_core::RapierSt::new(),
+            rp: crate::closure::CloState::new(),
         }
     }
 

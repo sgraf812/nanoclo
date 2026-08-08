@@ -1,7 +1,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use nanoda_lib::util::Config;
+use nanoclo::util::Config;
 use std::error::Error;
 use std::path::Path;
 
@@ -29,8 +29,8 @@ fn use_config(config_path: &Path) -> Result<Option<String>, Box<dyn Error>> {
     let (export_file, skipped_axioms) = cfg.to_export_file()?;
     // Check the environment
     export_file.check_all_declars();
-    if std::env::var("RAPIER_CTRS").is_ok() {
-        eprintln!("CTRS {}", nanoda_lib::rapier_core::ctrs_report());
+    if std::env::var("NANOCLO_CTRS").is_ok() {
+        eprintln!("CTRS {}", nanoclo::closure::ctrs_report());
     }
     // Pretty print as necessary
     let pp_errs = export_file.pp_selected_declars(pp_destination.as_mut());

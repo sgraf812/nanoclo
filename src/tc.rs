@@ -1,4 +1,4 @@
-use crate::rapier_core::{
+use crate::closure::{
     clo_le, Clo, Entry, EnvId, SClo, SpineVec, ENV_NIL,
 };
 use crate::env::{Declar, DeclarInfo, Env, ReducibilityHint};
@@ -114,7 +114,7 @@ impl<'p> ExportFile<'p> {
     }
 
     /// Check all declarations in this export file using a single thread.
-    /// Runs on a dedicated large-stack thread (the rapier core recurses over
+    /// Runs on a dedicated large-stack thread (conversion recurses over
     /// term structure). Each declaration gets its own context, so the
     /// expressions built while checking it are released when it finishes.
     pub(crate) fn check_all_declars_serial(&self) {
@@ -122,14 +122,14 @@ impl<'p> ExportFile<'p> {
             std::thread::Builder::new()
                 .stack_size(crate::STACK_SIZE)
                 .spawn_scoped(sco, || {
-                    let thresh: u128 = std::env::var("RAPIER_DECLTIME")
+                    let thresh: u128 = std::env::var("NANOCLO_DECLTIME")
                         .ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
-                    let report = std::env::var("RAPIER_DECLTIME").is_ok();
-                    let skip: usize = std::env::var("RAPIER_SKIP_UNTIL")
+                    let report = std::env::var("NANOCLO_DECLTIME").is_ok();
+                    let skip: usize = std::env::var("NANOCLO_SKIP_UNTIL")
                         .ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-                    let stop_after: Option<usize> = std::env::var("RAPIER_STOP_AFTER")
+                    let stop_after: Option<usize> = std::env::var("NANOCLO_STOP_AFTER")
                         .ok().and_then(|v| v.parse().ok());
-                    let repeat: usize = std::env::var("RAPIER_REPEAT")
+                    let repeat: usize = std::env::var("NANOCLO_REPEAT")
                         .ok().and_then(|v| v.parse().ok()).unwrap_or(1);
                     for (i, declar) in self.declars.values().enumerate() {
                         if i < skip {
@@ -275,9 +275,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
 
-    /// Delegates to the rapier delayed-instantiation core (`rapier_core.rs`).
+    /// Delegates to the delayed-instantiation core (`closure.rs`).
     pub(crate) fn infer(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
-        self.rp_infer(crate::rapier_core::Clo::of(e), flag)
+        self.nc_infer(crate::closure::Clo::of(e), flag)
     }
 
 
@@ -312,10 +312,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     
     // Not well tested, used for introspection/debugging.
 
-    /// Delegates to the rapier delayed-instantiation core (`rapier_core.rs`).
+    /// Delegates to the delayed-instantiation core (`closure.rs`).
     pub fn whnf(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
-        let s = self.rp_whnf_clo(crate::rapier_core::Clo::of(e));
-        let out = self.rp_sclo_to_expr(&s);
+        let s = self.nc_whnf_clo(crate::closure::Clo::of(e));
+        let out = self.nc_sclo_to_expr(&s);
         // mirror upstream whnf: sort levels come out simplified
         if let Sort { level, .. } = self.ctx.read_expr(out) {
             let level = self.ctx.simplify(level);
@@ -336,9 +336,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     pub fn assert_def_eq(&mut self, u: ExprPtr<'t>, v: ExprPtr<'t>) { assert!(self.def_eq(u, v)) }
 
-    /// Delegates to the rapier delayed-instantiation core (`rapier_core.rs`).
+    /// Delegates to the delayed-instantiation core (`closure.rs`).
     pub fn def_eq(&mut self, x: ExprPtr<'t>, y: ExprPtr<'t>) -> bool {
-        self.rp_is_def_eq(crate::rapier_core::Clo::of(x), crate::rapier_core::Clo::of(y))
+        self.nc_is_def_eq(crate::closure::Clo::of(x), crate::closure::Clo::of(y))
     }
 
 
@@ -410,7 +410,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     // ---- whnf ----
 
-    pub(crate) fn rp_mk_sclo(&self, c: Clo<'t>) -> SClo<'t> {
+    pub(crate) fn nc_mk_sclo(&self, c: Clo<'t>) -> SClo<'t> {
         let mut spine = SpineVec::new();
         let mut e = c.e;
         while let App { fun, arg, .. } = self.ctx.read_expr(e) {
@@ -425,21 +425,21 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// depth follows the term's reduction rather than its size. Grow the
     /// stack on demand here rather than sizing a thread stack for the worst
     /// input.
-    pub(crate) fn rp_whnf_clo(&mut self, c: Clo<'t>) -> SClo<'t> {
-        let d = self.rp_probe_suspend();
-        let r = stacker::maybe_grow(256 * 1024, 16 * 1024 * 1024, || self.rp_whnf_clo_inner(c));
-        self.rp_probe_resume(d);
+    pub(crate) fn nc_whnf_clo(&mut self, c: Clo<'t>) -> SClo<'t> {
+        let d = self.nc_probe_suspend();
+        let r = stacker::maybe_grow(256 * 1024, 16 * 1024 * 1024, || self.nc_whnf_clo_inner(c));
+        self.nc_probe_resume(d);
         r
     }
 
-    fn rp_whnf_clo_inner(&mut self, c: Clo<'t>) -> SClo<'t> {
-        let c = self.rp_norm_clo(c);
+    fn nc_whnf_clo_inner(&mut self, c: Clo<'t>) -> SClo<'t> {
+        let c = self.nc_norm_clo(c);
         match self.ctx.read_expr(c.e) {
             NatLit { .. } | StringLit { .. } | Sort { .. } | Pi { .. } | Lambda { .. }
             | Local { .. } => return SClo { head: c, spine: SpineVec::new() },
             _ => {}
         }
-        let k = self.rp_key(c);
+        let k = self.nc_key(c);
         if let Some(r) = self.ctx.rp.whnf_cache.get(&k) {
             let r = r.clone();
             self.ctx.rp.ctrs[4] += 1;
@@ -447,8 +447,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         self.ctx.rp.ctrs[5] += 1;
         self.ctx.rp.ctrs[2] += 1;
-        let t = self.rp_whnf_core_clo(c);
-        let r = self.rp_whnf_loop(t);
+        let t = self.nc_whnf_core_clo(c);
+        let r = self.nc_whnf_loop(t);
         // whnf_cache is never evicted: dropping a weak-head normal form makes
         // the checker redo whole reduction sequences, which on nested redexes
         // is the difference between linear and exponential. Measured on the
@@ -458,47 +458,47 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         r
     }
 
-    pub(crate) fn rp_whnf(&mut self, s: SClo<'t>) -> SClo<'t> {
+    pub(crate) fn nc_whnf(&mut self, s: SClo<'t>) -> SClo<'t> {
         self.ctx.rp.ctrs[2] += 1;
-        let t = self.rp_whnf_core(s);
-        self.rp_whnf_loop(t)
+        let t = self.nc_whnf_core(s);
+        self.nc_whnf_loop(t)
     }
 
-    fn rp_whnf_loop(&mut self, mut t: SClo<'t>) -> SClo<'t> {
+    fn nc_whnf_loop(&mut self, mut t: SClo<'t>) -> SClo<'t> {
         for _ in 0..100_000u32 {
-            if let Some(t2) = self.rp_reduce_nat(&t) {
-                t = self.rp_whnf_core(t2);
+            if let Some(t2) = self.nc_reduce_nat(&t) {
+                t = self.nc_whnf_core(t2);
                 continue;
             }
-            match self.rp_unfold_definition(&t) {
-                Some(t2) => t = self.rp_whnf_core(t2),
+            match self.nc_unfold_definition(&t) {
+                Some(t2) => t = self.nc_whnf_core(t2),
                 None => return t,
             }
         }
         panic!("whnf: reduction fuel exhausted")
     }
 
-    pub(crate) fn rp_whnf_core(&mut self, s: SClo<'t>) -> SClo<'t> {
-        self.rp_whnf_core_ext(s, false, false)
+    pub(crate) fn nc_whnf_core(&mut self, s: SClo<'t>) -> SClo<'t> {
+        self.nc_whnf_core_ext(s, false, false)
     }
 
     /// `whnf_core` entered at a closure: the head and spine come from `c.e`,
     /// and a head already in weak head normal form needs no spine.
-    fn rp_whnf_core_clo(&mut self, c: Clo<'t>) -> SClo<'t> {
-        let c = self.rp_norm_clo(c);
+    fn nc_whnf_core_clo(&mut self, c: Clo<'t>) -> SClo<'t> {
+        let c = self.nc_norm_clo(c);
         match self.ctx.read_expr(c.e) {
             NatLit { .. } | StringLit { .. } | Sort { .. } | Pi { .. } | Lambda { .. }
             | Local { .. } => return SClo { head: c, spine: SpineVec::new() },
             _ => {}
         }
-        let s = self.rp_mk_sclo(c);
-        self.rp_whnf_core_ext(s, false, false)
+        let s = self.nc_mk_sclo(c);
+        self.nc_whnf_core_ext(s, false, false)
     }
 
     /// `cheap`: skip recursor and projection reduction (the C++ kernel's
     /// cheap_rec/cheap_proj), so def-eq can compare stuck same-head
     /// applications structurally before forcing e.g. Nat.below towers.
-    fn rp_whnf_core_ext(&mut self, s: SClo<'t>, cheap_rec: bool, cheap_proj: bool) -> SClo<'t> {
+    fn nc_whnf_core_ext(&mut self, s: SClo<'t>, cheap_rec: bool, cheap_proj: bool) -> SClo<'t> {
         self.ctx.rp.ctrs[1] += 1;
         let SClo { head, spine } = s;
         let mut e = head.e;
@@ -512,7 +512,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     e = fun;
                 }
                 Var { .. } => {
-                    let (e2, env2) = self.rp_chase(e, env);
+                    let (e2, env2) = self.nc_chase(e, env);
                     if e2 == e && env2 == env {
                         break;
                     }
@@ -521,24 +521,24 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
                 Lambda { body, .. } => {
                     if let Some(arg) = rsp.pop() {
-                        env = self.rp_push_entry(env, Entry::Val(arg.e, arg.env));
+                        env = self.nc_push_entry(env, Entry::Val(arg.e, arg.env));
                         e = body;
                     } else {
                         break;
                     }
                 }
                 Let { val, body, .. } => {
-                    env = self.rp_push_entry(env, Entry::Val(val, env));
+                    env = self.nc_push_entry(env, Entry::Val(val, env));
                     e = body;
                 }
                 Proj { idx, structure, .. } => {
                     let sb = if cheap_proj {
-                        let s0 = self.rp_mk_sclo(Clo { e: structure, env });
-                        self.rp_whnf_core_ext(s0, cheap_rec, cheap_proj)
+                        let s0 = self.nc_mk_sclo(Clo { e: structure, env });
+                        self.nc_whnf_core_ext(s0, cheap_rec, cheap_proj)
                     } else {
-                        self.rp_whnf_clo(Clo { e: structure, env })
+                        self.nc_whnf_clo(Clo { e: structure, env })
                     };
-                    let sb = self.rp_lit_to_ctor(sb);
+                    let sb = self.nc_lit_to_ctor(sb);
                     let mut stepped = false;
                     if let Const { name, .. } = self.ctx.read_expr(sb.head.e) {
                         if let Some(ctor) = self.env.get_constructor(&name) {
@@ -566,7 +566,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         break;
                     }
                     let head = Clo { e, env };
-                    if let Some(r) = self.rp_reduce_recursor(head, &rsp, cheap_rec, cheap_proj) {
+                    if let Some(r) = self.nc_reduce_recursor(head, &rsp, cheap_rec, cheap_proj) {
                         e = r.head.e;
                         env = r.head.env;
                         rsp = r.spine;
@@ -583,19 +583,19 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
 
-    fn rp_lit_to_ctor(&mut self, s: SClo<'t>) -> SClo<'t> {
+    fn nc_lit_to_ctor(&mut self, s: SClo<'t>) -> SClo<'t> {
         if !s.spine.is_empty() {
             return s;
         }
         match self.ctx.read_expr(s.head.e) {
             NatLit { ptr, .. } => match self.ctx.nat_lit_to_constructor(ptr) {
-                Some(e) => self.rp_mk_sclo(Clo::of(e)),
+                Some(e) => self.nc_mk_sclo(Clo::of(e)),
                 None => s,
             },
             StringLit { ptr, .. } => match self.ctx.str_lit_to_constructor(ptr) {
                 Some(e) => {
-                    let m = self.rp_mk_sclo(Clo::of(e));
-                    self.rp_whnf(m)
+                    let m = self.nc_mk_sclo(Clo::of(e));
+                    self.nc_whnf(m)
                 }
                 None => s,
             },
@@ -603,7 +603,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn rp_delta_hint(&self, e: ExprPtr<'t>) -> Option<ReducibilityHint> {
+    fn nc_delta_hint(&self, e: ExprPtr<'t>) -> Option<ReducibilityHint> {
         if let Const { name, .. } = self.ctx.read_expr(e) {
             match self.env.get_declar(&name) {
                 Some(Declar::Definition { hint, .. }) => Some(*hint),
@@ -615,7 +615,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn rp_unfold_definition(&mut self, s: &SClo<'t>) -> Option<SClo<'t>> {
+    fn nc_unfold_definition(&mut self, s: &SClo<'t>) -> Option<SClo<'t>> {
         let (name, levels) = match self.ctx.read_expr(s.head.e) {
             Const { name, levels, .. } => (name, levels),
             _ => return None,
@@ -641,20 +641,20 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         } else {
             self.ctx.subst_expr_levels(def_value, def_uparams, levels)
         };
-        let m = self.rp_mk_sclo(Clo::of(r));
+        let m = self.nc_mk_sclo(Clo::of(r));
         let mut spine = m.spine;
         spine.extend_from_slice(&s.spine);
         Some(SClo { head: m.head, spine })
     }
 
-    fn rp_nat_lit(&mut self, c: Clo<'t>) -> Option<BigUint> {
+    fn nc_nat_lit(&mut self, c: Clo<'t>) -> Option<BigUint> {
         let nc = self.ctx.export_file.name_cache;
         match self.ctx.read_expr(c.e) {
             NatLit { ptr, .. } => return self.ctx.read_bignum(ptr).cloned(),
             Const { name, .. } if Some(name) == nc.nat_zero => return Some(BigUint::zero()),
             _ => {}
         }
-        let w = self.rp_whnf_clo(c);
+        let w = self.nc_whnf_clo(c);
         if !w.spine.is_empty() {
             return None;
         }
@@ -665,19 +665,19 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn rp_mk_nat_sclo(&mut self, n: BigUint) -> SClo<'t> {
+    fn nc_mk_nat_sclo(&mut self, n: BigUint) -> SClo<'t> {
         let e = self.ctx.mk_nat_lit_quick(n).unwrap();
         SClo { head: Clo::of(e), spine: SpineVec::new() }
     }
 
-    fn rp_mk_bool_sclo(&mut self, b: bool) -> Option<SClo<'t>> {
+    fn nc_mk_bool_sclo(&mut self, b: bool) -> Option<SClo<'t>> {
         let e = self.ctx.bool_to_expr(b)?;
         Some(SClo { head: Clo::of(e), spine: SpineVec::new() })
     }
 
     /// The Nat primitive this spined application would dispatch to, if any.
-    /// Shared by `rp_reduce_nat` and lazy-delta's cheap pre-test.
-    fn rp_nat_op(&self, s: &SClo<'t>) -> Option<NatOp> {
+    /// Shared by `nc_reduce_nat` and lazy-delta's cheap pre-test.
+    fn nc_nat_op(&self, s: &SClo<'t>) -> Option<NatOp> {
         let f = match self.ctx.read_expr(s.head.e) {
             Const { name, levels, .. } if self.ctx.read_levels(levels).is_empty() => Some(name),
             _ => return None,
@@ -720,26 +720,26 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         (s.spine.len() == arity).then_some(op)
     }
 
-    fn rp_reduce_nat(&mut self, s: &SClo<'t>) -> Option<SClo<'t>> {
+    fn nc_reduce_nat(&mut self, s: &SClo<'t>) -> Option<SClo<'t>> {
         if !self.ctx.export_file.config.nat_extension {
             return None;
         }
         use NatOp::*;
-        let op = self.rp_nat_op(s)?;
+        let op = self.nc_nat_op(s)?;
         if op == Succ {
-            let v = self.rp_nat_lit(s.spine[0])?;
-            return Some(self.rp_mk_nat_sclo(v + 1u32));
+            let v = self.nc_nat_lit(s.spine[0])?;
+            return Some(self.nc_mk_nat_sclo(v + 1u32));
         }
         // exponent/shift bound is checked before the base is forced
-        let b = self.rp_nat_lit(s.spine[1])?;
+        let b = self.nc_nat_lit(s.spine[1])?;
         if matches!(op, Pow | Shl) && b > BigUint::from(1u32 << 24) {
             return None;
         }
-        let a = self.rp_nat_lit(s.spine[0])?;
+        let a = self.nc_nat_lit(s.spine[0])?;
         let r = match op {
             Succ => unreachable!(),
-            Beq => return self.rp_mk_bool_sclo(a == b),
-            Ble => return self.rp_mk_bool_sclo(a <= b),
+            Beq => return self.nc_mk_bool_sclo(a == b),
+            Ble => return self.nc_mk_bool_sclo(a <= b),
             Add => a + b,
             Sub => nat_sub(a, b),
             Mul => a * b,
@@ -756,7 +756,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 None => BigUint::zero(),
             },
         };
-        Some(self.rp_mk_nat_sclo(r))
+        Some(self.nc_mk_nat_sclo(r))
     }
 
     /// `rsp` is the reversed spine (last = innermost arg). Returns the reduct
@@ -764,7 +764,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// `cheap`: the major premise is reduced with cheap whnf_core only, and
     /// the K/struct constructor conversions (which infer types) are skipped;
     /// the full pass at def-eq's last resort covers them.
-    fn rp_reduce_recursor(
+    fn nc_reduce_recursor(
         &mut self,
         head: Clo<'t>,
         rsp: &[Clo<'t>],
@@ -790,16 +790,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if let Some((mk_pos, arg_pos)) = pos {
                 if mk_pos < len {
                     let mk = if cheap_rec {
-                        let s0 = self.rp_mk_sclo(idx(mk_pos));
-                        self.rp_whnf_core_ext(s0, cheap_rec, cheap_proj)
+                        let s0 = self.nc_mk_sclo(idx(mk_pos));
+                        self.nc_whnf_core_ext(s0, cheap_rec, cheap_proj)
                     } else {
-                        self.rp_whnf_clo(idx(mk_pos))
+                        self.nc_whnf_clo(idx(mk_pos))
                     };
                     let is_mk = matches!(self.ctx.read_expr(mk.head.e),
                         Const { name, .. } if Some(name) == nc.quot_mk)
                         && mk.spine.len() == 3;
                     if is_mk {
-                        let m = self.rp_mk_sclo(idx(arg_pos));
+                        let m = self.nc_mk_sclo(idx(arg_pos));
                         let mut spine = m.spine;
                         spine.push(mk.spine[2]);
                         spine.extend((mk_pos + 1..len).map(idx));
@@ -829,23 +829,23 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // nullary constructor without ever being reduced. The major itself is
         // whnf'd only afterwards (trivial when the conversion fired).
         let mut mj = if cheap_rec {
-            let s0 = self.rp_mk_sclo(idx(major_idx));
-            self.rp_whnf_core_ext(s0, cheap_rec, cheap_proj)
+            let s0 = self.nc_mk_sclo(idx(major_idx));
+            self.nc_whnf_core_ext(s0, cheap_rec, cheap_proj)
         } else if is_k && major_induct.is_some() {
-            let s0 = self.rp_mk_sclo(idx(major_idx));
-            let conv = self.rp_to_ctor_when_k(num_params, major_induct.unwrap(), s0.clone());
+            let s0 = self.nc_mk_sclo(idx(major_idx));
+            let conv = self.nc_to_ctor_when_k(num_params, major_induct.unwrap(), s0.clone());
             if conv.head == s0.head && conv.spine == s0.spine {
-                self.rp_whnf_clo(idx(major_idx))
+                self.nc_whnf_clo(idx(major_idx))
             } else {
-                self.rp_whnf(conv)
+                self.nc_whnf(conv)
             }
         } else {
-            self.rp_whnf_clo(idx(major_idx))
+            self.nc_whnf_clo(idx(major_idx))
         };
-        mj = self.rp_lit_to_ctor(mj);
+        mj = self.nc_lit_to_ctor(mj);
         if !cheap_rec {
             if let Some(mi) = major_induct {
-                mj = self.rp_to_ctor_when_struct(mi, mj);
+                mj = self.nc_to_ctor_when_struct(mi, mj);
             }
         }
         let ctor = match self.ctx.read_expr(mj.head.e) {
@@ -859,7 +859,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let rhs = self.ctx.subst_expr_levels(rule.val, rec_uparams, ls);
         let first_index_idx = (num_params + num_motives + num_minors) as usize;
-        let m = self.rp_mk_sclo(Clo::of(rhs));
+        let m = self.nc_mk_sclo(Clo::of(rhs));
         let mut spine = m.spine;
         spine.extend((0..first_index_idx).map(idx));
         spine.extend_from_slice(&mj.spine[mj.spine.len() - rule_nfields as usize..]);
@@ -867,14 +867,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         Some(SClo { head: m.head, spine })
     }
 
-    fn rp_to_ctor_when_k(
+    fn nc_to_ctor_when_k(
         &mut self,
         num_params: u16,
         major_induct: NamePtr<'t>,
         mj: SClo<'t>,
     ) -> SClo<'t> {
-        let ty = self.rp_infer_s(&mj, InferOnly);
-        let app_type = self.rp_whnf_clo(Clo::of(ty));
+        let ty = self.nc_infer_s(&mj, InferOnly);
+        let app_type = self.nc_whnf_clo(Clo::of(ty));
         let (i, ils) = match self.ctx.read_expr(app_type.head.e) {
             Const { name, levels, .. } => (name, levels),
             _ => return mj,
@@ -894,15 +894,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             head: Clo::of(ctor_e),
             spine: app_type.spine[..(num_params as usize).min(app_type.spine.len())].iter().copied().collect(),
         };
-        let new_ty = self.rp_infer_s(&new_ctor, InferOnly);
-        let app_clo = self.rp_sclo_as_clo(&app_type);
-        if self.rp_is_def_eq(app_clo, Clo::of(new_ty)) {
+        let new_ty = self.nc_infer_s(&new_ctor, InferOnly);
+        let app_clo = self.nc_sclo_as_clo(&app_type);
+        if self.nc_is_def_eq(app_clo, Clo::of(new_ty)) {
             return new_ctor;
         }
         mj
     }
 
-    fn rp_to_ctor_when_struct(&mut self, induct: NamePtr<'t>, mj: SClo<'t>) -> SClo<'t> {
+    fn nc_to_ctor_when_struct(&mut self, induct: NamePtr<'t>, mj: SClo<'t>) -> SClo<'t> {
         if !self.env.can_be_struct(&induct) {
             return mj;
         }
@@ -911,8 +911,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return mj;
             }
         }
-        let ty = self.rp_infer_s(&mj, InferOnly);
-        let e_type = self.rp_whnf_clo(Clo::of(ty));
+        let ty = self.nc_infer_s(&mj, InferOnly);
+        let e_type = self.nc_whnf_clo(Clo::of(ty));
         let (i, ils) = match self.ctx.read_expr(e_type.head.e) {
             Const { name, levels, .. } => (name, levels),
             _ => return mj,
@@ -923,8 +923,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // A structure whose universe an instantiation may send to zero is
         // left alone: expanding a proof into its fields would equate proofs
         // that proof irrelevance already equates on other grounds.
-        let tyty = self.rp_infer_s(&e_type, InferOnly);
-        let tyty_w = self.rp_whnf_clo(Clo::of(tyty));
+        let tyty = self.nc_infer_s(&e_type, InferOnly);
+        let tyty_w = self.nc_whnf_clo(Clo::of(tyty));
         if let Sort { level, .. } = self.ctx.read_expr(tyty_w.head.e) {
             if tyty_w.spine.is_empty() && self.ctx.may_be_prop(level) {
                 return mj;
@@ -941,13 +941,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             Some(cd) => (cd.num_params, cd.num_fields),
             None => return mj,
         };
-        let mj_clo = self.rp_sclo_as_clo(&mj);
+        let mj_clo = self.nc_sclo_as_clo(&mj);
         let mut spine: SpineVec<'t> =
             e_type.spine[..(num_params as usize).min(e_type.spine.len())].iter().copied().collect();
         for fi in 0..num_fields {
             let bv = self.ctx.mk_var(0);
             let proj = self.ctx.mk_proj(i, fi as usize, bv);
-            let env = self.rp_push_entry(ENV_NIL, Entry::Val(mj_clo.e, mj_clo.env));
+            let env = self.nc_push_entry(ENV_NIL, Entry::Val(mj_clo.e, mj_clo.env));
             spine.push(Clo { e: proj, env });
         }
         let head = self.ctx.mk_const(ctor, ils);
@@ -956,14 +956,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Closure denoting the same term as `s` (no lifting; head and spine go
     /// through a fresh environment of bvars). Unstable env identity.
-    fn rp_sclo_as_clo(&mut self, s: &SClo<'t>) -> Clo<'t> {
+    fn nc_sclo_as_clo(&mut self, s: &SClo<'t>) -> Clo<'t> {
         if s.spine.is_empty() {
             return s.head;
         }
-        let mut env = self.rp_push_entry(ENV_NIL, Entry::Val(s.head.e, s.head.env));
+        let mut env = self.nc_push_entry(ENV_NIL, Entry::Val(s.head.e, s.head.env));
         let mut e = self.ctx.mk_var(u16::try_from(s.spine.len()).unwrap());
         for (i, arg) in s.spine.iter().enumerate() {
-            env = self.rp_push_entry(env, Entry::Val(arg.e, arg.env));
+            env = self.nc_push_entry(env, Entry::Val(arg.e, arg.env));
             let bv = self.ctx.mk_var(u16::try_from(s.spine.len() - 1 - i).unwrap());
             e = self.ctx.mk_app(e, bv);
         }
@@ -985,7 +985,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     // truncated weak head normal form would be recorded by the memos that
     // reduction shares with inference.
 
-    fn rp_probe_enter(&mut self, budget: u64) -> (u64, bool, usize, usize) {
+    fn nc_probe_enter(&mut self, budget: u64) -> (u64, bool, usize, usize) {
         let saved = (
             self.ctx.rp.probe_fuel,
             self.ctx.rp.probe_aborted,
@@ -1003,7 +1003,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Whether the comparison ran out of fuel, in which case its answer says
     /// nothing. A comparison that finished contributes what it found unequal.
-    fn rp_probe_exit(&mut self, saved: (u64, bool, usize, usize)) -> bool {
+    fn nc_probe_exit(&mut self, saved: (u64, bool, usize, usize)) -> bool {
         let aborted = self.ctx.rp.probe_aborted;
         self.ctx.rp.probe_depth -= 1;
         if self.ctx.rp.probe_depth == 0 {
@@ -1029,7 +1029,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     #[inline]
-    fn rp_spend(&mut self) {
+    fn nc_spend(&mut self) {
         if self.ctx.rp.probe_depth > 0 && !self.ctx.rp.probe_aborted {
             if self.ctx.rp.probe_fuel == 0 {
                 self.ctx.rp.probe_aborted = true;
@@ -1040,38 +1040,38 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     #[inline]
-    fn rp_in_probe(&self) -> bool { self.ctx.rp.probe_depth > 0 }
+    fn nc_in_probe(&self) -> bool { self.ctx.rp.probe_depth > 0 }
 
     /// Step outside the budget. Reduction and inference write memos that
     /// conversion shares with the rest of the checker, and an entry recorded
     /// from a truncated reduction would be read later as a final answer, so
     /// they run to completion whatever the budget says.
     #[inline]
-    fn rp_probe_suspend(&mut self) -> u32 {
+    fn nc_probe_suspend(&mut self) -> u32 {
         std::mem::replace(&mut self.ctx.rp.probe_depth, 0)
     }
 
     #[inline]
-    fn rp_probe_resume(&mut self, depth: u32) { self.ctx.rp.probe_depth = depth; }
+    fn nc_probe_resume(&mut self, depth: u32) { self.ctx.rp.probe_depth = depth; }
 
     // ---- def-eq ----
 
-    pub(crate) fn rp_is_def_eq(&mut self, t: Clo<'t>, s: Clo<'t>) -> bool {
+    pub(crate) fn nc_is_def_eq(&mut self, t: Clo<'t>, s: Clo<'t>) -> bool {
         self.ctx.rp.ctrs[3] += 1;
-        if self.rp_clo_eq(t, s) {
+        if self.nc_clo_eq(t, s) {
             return true;
         }
-        self.rp_spend();
+        self.nc_spend();
         if self.ctx.rp.probe_aborted {
             return false;
         }
-        let (tk, sk) = (self.rp_norm_clo(t), self.rp_norm_clo(s));
-        let (tkey, skey) = (self.rp_key(tk), self.rp_key(sk));
+        let (tk, sk) = (self.nc_norm_clo(t), self.nc_norm_clo(s));
+        let (tkey, skey) = (self.nc_key(tk), self.nc_key(sk));
         if self.ctx.rp.eq_pos.known_eq(&tkey, &skey) {
             self.ctx.rp.ctrs[6] += 1;
             return true;
         }
-        if let (Some(a), Some(b)) = (self.rp_global_key(tk), self.rp_global_key(sk)) {
+        if let (Some(a), Some(b)) = (self.nc_global_key(tk), self.nc_global_key(sk)) {
             let gpk = if a.get_hash() <= b.get_hash() { (a, b) } else { (b, a) };
             if self.ctx.rp.g_eq_pos.known_eq(&a, &b) {
                 self.ctx.rp.ctrs[6] += 1;
@@ -1082,10 +1082,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return false;
             }
             self.ctx.rp.ctrs[7] += 1;
-            let r = self.rp_is_def_eq_clo(tk, sk);
+            let r = self.nc_is_def_eq_clo(tk, sk);
             if r {
                 self.ctx.rp.g_eq_pos.union(a, b);
-            } else if self.rp_in_probe() {
+            } else if self.nc_in_probe() {
                 self.ctx.rp.probe_gneg.push(gpk);
             } else {
                 self.ctx.rp.g_eq_neg.insert(gpk);
@@ -1094,16 +1094,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let pk = if clo_le(&tkey, &skey) { (tkey, skey) } else { (skey, tkey) };
         if self.ctx.rp.eq_neg.contains(&pk)
-            || (self.rp_in_probe() && self.ctx.rp.probe_neg.contains(&pk))
+            || (self.nc_in_probe() && self.ctx.rp.probe_neg.contains(&pk))
         {
             self.ctx.rp.ctrs[6] += 1;
             return false;
         }
         self.ctx.rp.ctrs[7] += 1;
-        let r = self.rp_is_def_eq_clo(tk, sk);
+        let r = self.nc_is_def_eq_clo(tk, sk);
         if r {
             self.ctx.rp.eq_pos.union(tkey, skey);
-        } else if self.rp_in_probe() {
+        } else if self.nc_in_probe() {
             if self.ctx.rp.probe_neg.insert(pk) {
                 self.ctx.rp.probe_neg_log.push(pk);
             }
@@ -1114,22 +1114,22 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     /// Both sides enter `whnf_core` at a closure key, so the memo applies.
-    fn rp_is_def_eq_clo(&mut self, t: Clo<'t>, s: Clo<'t>) -> bool {
-        let tn = self.rp_whnf_core_clo(t);
-        let sn = self.rp_whnf_core_clo(s);
-        if self.rp_s_quick_eq(&tn, &sn) {
+    fn nc_is_def_eq_clo(&mut self, t: Clo<'t>, s: Clo<'t>) -> bool {
+        let tn = self.nc_whnf_core_clo(t);
+        let sn = self.nc_whnf_core_clo(s);
+        if self.nc_s_quick_eq(&tn, &sn) {
             return true;
         }
-        self.rp_is_def_eq_s_core(tn, sn)
+        self.nc_is_def_eq_s_core(tn, sn)
     }
 
-    fn rp_is_def_eq_s(&mut self, t: SClo<'t>, s: SClo<'t>) -> bool {
-        let tn = self.rp_whnf_core_ext(t, false, false);
-        let sn = self.rp_whnf_core_ext(s, false, false);
-        if self.rp_s_quick_eq(&tn, &sn) {
+    fn nc_is_def_eq_s(&mut self, t: SClo<'t>, s: SClo<'t>) -> bool {
+        let tn = self.nc_whnf_core_ext(t, false, false);
+        let sn = self.nc_whnf_core_ext(s, false, false);
+        if self.nc_s_quick_eq(&tn, &sn) {
             return true;
         }
-        self.rp_is_def_eq_s_core(tn, sn)
+        self.nc_is_def_eq_s_core(tn, sn)
     }
 
     /// A right side of `Bool.true` is settled by evaluating the left one,
@@ -1138,7 +1138,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Evaluation waits for the left side to be free of free variables unless
     /// the term wrapped the argument in `eagerReduce`, whose whole purpose is
     /// to ask for it sooner.
-    fn rp_bool_true_by_evaluation(&mut self, tn: &SClo<'t>, sn: &SClo<'t>) -> bool {
+    fn nc_bool_true_by_evaluation(&mut self, tn: &SClo<'t>, sn: &SClo<'t>) -> bool {
         if !sn.spine.is_empty() {
             return false;
         }
@@ -1149,41 +1149,41 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             Const { name, .. } if name == bool_true => {}
             _ => return false,
         }
-        if !self.ctx.eager_mode && self.rp_sclo_has_fvar(tn) {
+        if !self.ctx.eager_mode && self.nc_sclo_has_fvar(tn) {
             return false;
         }
-        let w = self.rp_whnf(tn.clone());
+        let w = self.nc_whnf(tn.clone());
         w.spine.is_empty()
             && matches!(self.ctx.read_expr(w.head.e), Const { name, .. } if name == bool_true)
     }
 
-    fn rp_is_def_eq_s_core(&mut self, tn: SClo<'t>, sn: SClo<'t>) -> bool {
-        if let Some(b) = self.rp_quick_heads(&tn, &sn) {
+    fn nc_is_def_eq_s_core(&mut self, tn: SClo<'t>, sn: SClo<'t>) -> bool {
+        if let Some(b) = self.nc_quick_heads(&tn, &sn) {
             return b;
         }
-        if self.rp_bool_true_by_evaluation(&tn, &sn) {
+        if self.nc_bool_true_by_evaluation(&tn, &sn) {
             return true;
         }
-        if let Some(b) = self.rp_def_eq_offset(&tn, &sn) {
+        if let Some(b) = self.nc_def_eq_offset(&tn, &sn) {
             return b;
         }
         // proof irrelevance
-        let t_ty = self.rp_infer_s(&tn, InferOnly);
-        if self.rp_is_prop(t_ty) {
-            let s_ty = self.rp_infer_s(&sn, InferOnly);
-            if self.rp_is_def_eq(Clo::of(t_ty), Clo::of(s_ty)) {
+        let t_ty = self.nc_infer_s(&tn, InferOnly);
+        if self.nc_is_prop(t_ty) {
+            let s_ty = self.nc_infer_s(&sn, InferOnly);
+            if self.nc_is_def_eq(Clo::of(t_ty), Clo::of(s_ty)) {
                 return true;
             }
         }
-        match self.rp_lazy_delta(tn, sn, 10_000) {
+        match self.nc_lazy_delta(tn, sn, 10_000) {
             Ok(b) => b,
             Err((tn, sn)) => {
-                if let Some(b) = self.rp_quick_heads(&tn, &sn) {
+                if let Some(b) = self.nc_quick_heads(&tn, &sn) {
                     return b;
                 }
                 match self.ctx.read_expr_pair(tn.head.e, sn.head.e) {
                     (Const { name: c1, levels: l1, .. }, Const { name: c2, levels: l2, .. }) => {
-                        if c1 == c2 && self.rp_lvl_eq_list(l1, l2) && self.rp_def_eq_spines(&tn, &sn)
+                        if c1 == c2 && self.nc_lvl_eq_list(l1, l2) && self.nc_def_eq_spines(&tn, &sn)
                         {
                             return true;
                         }
@@ -1193,8 +1193,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         Local { id: i2, binder_type: t2, .. },
                     ) => {
                         let heads_eq = tn.head.e == sn.head.e
-                            || (i1 == i2 && self.rp_is_def_eq(Clo::of(t1), Clo::of(t2)));
-                        if heads_eq && self.rp_def_eq_spines(&tn, &sn) {
+                            || (i1 == i2 && self.nc_is_def_eq(Clo::of(t1), Clo::of(t2)));
+                        if heads_eq && self.nc_def_eq_spines(&tn, &sn) {
                             return true;
                         }
                     }
@@ -1204,49 +1204,49 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     ) => {
                         if n1 == n2
                             && i1 == i2
-                            && self.rp_is_def_eq(
+                            && self.nc_is_def_eq(
                                 Clo { e: e1, env: tn.head.env },
                                 Clo { e: e2, env: sn.head.env },
                             )
-                            && self.rp_def_eq_spines(&tn, &sn)
+                            && self.nc_def_eq_spines(&tn, &sn)
                         {
                             return true;
                         }
                     }
                     _ => {}
                 }
-                if self.rp_try_eta_expansion(&tn, &sn) {
+                if self.nc_try_eta_expansion(&tn, &sn) {
                     return true;
                 }
-                if self.rp_try_eta_struct(&tn, &sn) {
+                if self.nc_try_eta_struct(&tn, &sn) {
                     return true;
                 }
-                if self.rp_def_eq_string_lit(&tn, &sn) {
+                if self.nc_def_eq_string_lit(&tn, &sn) {
                     return true;
                 }
-                if self.rp_def_eq_unit_like(&tn, &sn) {
+                if self.nc_def_eq_unit_like(&tn, &sn) {
                     return true;
                 }
                 // last resort: reduce fully (iota and proj) and retry if
                 // either side changed, as in the C++ kernel's final
                 // whnf_core-and-recurse step
-                let tf = self.rp_whnf_core(tn.clone());
-                let sf = self.rp_whnf_core(sn.clone());
+                let tf = self.nc_whnf_core(tn.clone());
+                let sf = self.nc_whnf_core(sn.clone());
                 let t_changed = !(tf.head == tn.head && tf.spine == tn.spine);
                 let s_changed = !(sf.head == sn.head && sf.spine == sn.spine);
                 if t_changed || s_changed {
-                    return self.rp_is_def_eq_s(tf, sf);
+                    return self.nc_is_def_eq_s(tf, sf);
                 }
                 false
             }
         }
     }
 
-    fn rp_lvl_eq1(&mut self, l1: LevelPtr<'t>, l2: LevelPtr<'t>) -> bool {
+    fn nc_lvl_eq1(&mut self, l1: LevelPtr<'t>, l2: LevelPtr<'t>) -> bool {
         l1 == l2 || self.ctx.eq_antisymm(l1, l2)
     }
 
-    fn rp_lvl_eq_list(&mut self, ls: LevelsPtr<'t>, rs: LevelsPtr<'t>) -> bool {
+    fn nc_lvl_eq_list(&mut self, ls: LevelsPtr<'t>, rs: LevelsPtr<'t>) -> bool {
         if ls == rs {
             return true;
         }
@@ -1255,34 +1255,34 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return false;
         }
         for (&a, &b) in xs.iter().zip(ys.iter()) {
-            if !self.rp_lvl_eq1(a, b) {
+            if !self.nc_lvl_eq1(a, b) {
                 return false;
             }
         }
         true
     }
 
-    fn rp_def_eq_spines(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> bool {
+    fn nc_def_eq_spines(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> bool {
         if t.spine.len() != s.spine.len() {
             return false;
         }
         for (&x, &y) in t.spine.iter().zip(s.spine.iter()) {
-            if !self.rp_is_def_eq(x, y) {
+            if !self.nc_is_def_eq(x, y) {
                 return false;
             }
         }
         true
     }
 
-    fn rp_quick_heads(&mut self, tn: &SClo<'t>, sn: &SClo<'t>) -> Option<bool> {
+    fn nc_quick_heads(&mut self, tn: &SClo<'t>, sn: &SClo<'t>) -> Option<bool> {
         match self.ctx.read_expr_pair(tn.head.e, sn.head.e) {
             (Lambda { .. }, Lambda { .. }) | (Pi { .. }, Pi { .. }) => {
                 if tn.spine.is_empty() && sn.spine.is_empty() {
-                    return Some(self.rp_def_eq_binding(tn.head, sn.head));
+                    return Some(self.nc_def_eq_binding(tn.head, sn.head));
                 }
                 None
             }
-            (Sort { level: l1, .. }, Sort { level: l2, .. }) => Some(self.rp_lvl_eq1(l1, l2)),
+            (Sort { level: l1, .. }, Sort { level: l2, .. }) => Some(self.nc_lvl_eq1(l1, l2)),
             (NatLit { ptr: a, .. }, NatLit { ptr: b, .. }) => {
                 if tn.spine.is_empty() && sn.spine.is_empty() {
                     return Some(a == b);
@@ -1299,7 +1299,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn rp_def_eq_binding(&mut self, t: Clo<'t>, s: Clo<'t>) -> bool {
+    fn nc_def_eq_binding(&mut self, t: Clo<'t>, s: Clo<'t>) -> bool {
         let (td, tb, sd, sb) = match self.ctx.read_expr_pair(t.e, s.e) {
             (
                 Lambda { binder_type: td, body: tb, .. },
@@ -1308,19 +1308,19 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             | (Pi { binder_type: td, body: tb, .. }, Pi { binder_type: sd, body: sb, .. }) => {
                 (td, tb, sd, sb)
             }
-            _ => return self.rp_is_def_eq(t, s),
+            _ => return self.nc_is_def_eq(t, s),
         };
         let tdc = Clo { e: td, env: t.env };
         let sdc = Clo { e: sd, env: s.env };
-        if !self.rp_is_def_eq(tdc, sdc) {
+        if !self.nc_is_def_eq(tdc, sdc) {
             return false;
         }
-        let d = self.rp_reify(sdc);
-        let level = self.rp_next_level(t.e, t.env).max(self.rp_next_level(s.e, s.env));
-        let fv = self.rp_fvar_at(level, d);
-        let tenv = self.rp_push_entry(t.env, Entry::Neu(fv));
-        let senv = self.rp_push_entry(s.env, Entry::Neu(fv));
-        self.rp_def_eq_binding(Clo { e: tb, env: tenv }, Clo { e: sb, env: senv })
+        let d = self.nc_reify(sdc);
+        let level = self.nc_next_level(t.e, t.env).max(self.nc_next_level(s.e, s.env));
+        let fv = self.nc_fvar_at(level, d);
+        let tenv = self.nc_push_entry(t.env, Entry::Neu(fv));
+        let senv = self.nc_push_entry(s.env, Entry::Neu(fv));
+        self.nc_def_eq_binding(Clo { e: tb, env: tenv }, Clo { e: sb, env: senv })
     }
 
     /// Whether the substitution instance denoted by `(e, env)` contains a
@@ -1328,11 +1328,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// of `e` resolving through `env` to a neutral entry or to a value
     /// closure that contains one. Follows the same traversal as `reify_go`,
     /// so the answer equals `has_fvars` of the reification.
-    fn rp_clo_has_fvar(&mut self, e: ExprPtr<'t>, env: EnvId) -> bool {
-        self.rp_clo_has_fvar_go(e, env, 0)
+    fn nc_clo_has_fvar(&mut self, e: ExprPtr<'t>, env: EnvId) -> bool {
+        self.nc_clo_has_fvar_go(e, env, 0)
     }
 
-    fn rp_clo_has_fvar_go(&mut self, e: ExprPtr<'t>, env: EnvId, offset: u16) -> bool {
+    fn nc_clo_has_fvar_go(&mut self, e: ExprPtr<'t>, env: EnvId, offset: u16) -> bool {
         let n = self.ctx.read_expr(e);
         if n.has_fvars() {
             return true;
@@ -1345,52 +1345,52 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return r;
         }
         let r = match n {
-            Var { dbj_idx, .. } => match self.rp_lookup(env, dbj_idx - offset) {
+            Var { dbj_idx, .. } => match self.nc_lookup(env, dbj_idx - offset) {
                 Entry::Neu(_) => true,
-                Entry::Val(e2, env2) => self.rp_clo_has_fvar_go(e2, env2, 0),
+                Entry::Val(e2, env2) => self.nc_clo_has_fvar_go(e2, env2, 0),
             },
             App { fun, arg, .. } => {
-                self.rp_clo_has_fvar_go(fun, env, offset)
-                    || self.rp_clo_has_fvar_go(arg, env, offset)
+                self.nc_clo_has_fvar_go(fun, env, offset)
+                    || self.nc_clo_has_fvar_go(arg, env, offset)
             }
             Lambda { binder_type, body, .. } | Pi { binder_type, body, .. } => {
-                self.rp_clo_has_fvar_go(binder_type, env, offset)
-                    || self.rp_clo_has_fvar_go(body, env, offset + 1)
+                self.nc_clo_has_fvar_go(binder_type, env, offset)
+                    || self.nc_clo_has_fvar_go(body, env, offset + 1)
             }
             Let { binder_type, val, body, .. } => {
-                self.rp_clo_has_fvar_go(binder_type, env, offset)
-                    || self.rp_clo_has_fvar_go(val, env, offset)
-                    || self.rp_clo_has_fvar_go(body, env, offset + 1)
+                self.nc_clo_has_fvar_go(binder_type, env, offset)
+                    || self.nc_clo_has_fvar_go(val, env, offset)
+                    || self.nc_clo_has_fvar_go(body, env, offset + 1)
             }
-            Proj { structure, .. } => self.rp_clo_has_fvar_go(structure, env, offset),
+            Proj { structure, .. } => self.nc_clo_has_fvar_go(structure, env, offset),
             _ => false,
         };
         self.ctx.rp.clo_fvar_cache.insert(key, r);
         r
     }
 
-    fn rp_sclo_has_fvar(&mut self, s: &SClo<'t>) -> bool {
-        if self.rp_clo_has_fvar(s.head.e, s.head.env) {
+    fn nc_sclo_has_fvar(&mut self, s: &SClo<'t>) -> bool {
+        if self.nc_clo_has_fvar(s.head.e, s.head.env) {
             return true;
         }
         for &c in s.spine.iter() {
-            if self.rp_clo_has_fvar(c.e, c.env) {
+            if self.nc_clo_has_fvar(c.e, c.env) {
                 return true;
             }
         }
         false
     }
 
-    fn rp_nat_zero_s(&mut self, t: &SClo<'t>) -> bool {
+    fn nc_nat_zero_s(&mut self, t: &SClo<'t>) -> bool {
         t.spine.is_empty() && self.ctx.is_nat_zero(t.head.e)
     }
 
-    fn rp_nat_succ_of(&mut self, t: &SClo<'t>) -> Option<SClo<'t>> {
+    fn nc_nat_succ_of(&mut self, t: &SClo<'t>) -> Option<SClo<'t>> {
         if t.spine.is_empty() {
             if let NatLit { ptr, .. } = self.ctx.read_expr(t.head.e) {
                 let n = self.ctx.read_bignum(ptr).cloned()?;
                 if !n.is_zero() {
-                    return Some(self.rp_mk_nat_sclo(n - 1u32));
+                    return Some(self.nc_mk_nat_sclo(n - 1u32));
                 }
             }
             None
@@ -1398,25 +1398,25 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             && matches!(self.ctx.read_expr(t.head.e),
                 Const { name, .. } if Some(name) == self.ctx.export_file.name_cache.nat_succ)
         {
-            Some(self.rp_mk_sclo(t.spine[0]))
+            Some(self.nc_mk_sclo(t.spine[0]))
         } else {
             None
         }
     }
 
-    fn rp_def_eq_offset(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> Option<bool> {
-        if self.rp_nat_zero_s(t) && self.rp_nat_zero_s(s) {
+    fn nc_def_eq_offset(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> Option<bool> {
+        if self.nc_nat_zero_s(t) && self.nc_nat_zero_s(s) {
             return Some(true);
         }
-        if let (Some(t2), Some(s2)) = (self.rp_nat_succ_of(t), self.rp_nat_succ_of(s)) {
-            return Some(self.rp_is_def_eq_s(t2, s2));
+        if let (Some(t2), Some(s2)) = (self.nc_nat_succ_of(t), self.nc_nat_succ_of(s)) {
+            return Some(self.nc_is_def_eq_s(t2, s2));
         }
         None
     }
 
     /// `Ok(b)` decided; `Err((tn, sn))` both irreducible.
     #[allow(clippy::type_complexity)]
-    fn rp_lazy_delta(
+    fn nc_lazy_delta(
         &mut self,
         tn: SClo<'t>,
         sn: SClo<'t>,
@@ -1425,54 +1425,54 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if fuel == 0 {
             panic!("lazy_delta: fuel exhausted");
         }
-        self.rp_spend();
+        self.nc_spend();
         if self.ctx.rp.probe_aborted {
             return Err((tn, sn));
         }
-        if self.rp_s_quick_eq(&tn, &sn) {
+        if self.nc_s_quick_eq(&tn, &sn) {
             return Ok(true);
         }
-        if let Some(b) = self.rp_def_eq_offset(&tn, &sn) {
+        if let Some(b) = self.nc_def_eq_offset(&tn, &sn) {
             return Ok(b);
         }
-        if (self.rp_nat_op(&tn).is_some() || self.rp_nat_op(&sn).is_some())
+        if (self.nc_nat_op(&tn).is_some() || self.nc_nat_op(&sn).is_some())
             && (self.ctx.eager_mode
-                || (!self.rp_sclo_has_fvar(&tn) && !self.rp_sclo_has_fvar(&sn)))
+                || (!self.nc_sclo_has_fvar(&tn) && !self.nc_sclo_has_fvar(&sn)))
         {
-            if let Some(t2) = self.rp_reduce_nat(&tn) {
-                return Ok(self.rp_is_def_eq_s(t2, sn));
+            if let Some(t2) = self.nc_reduce_nat(&tn) {
+                return Ok(self.nc_is_def_eq_s(t2, sn));
             }
-            if let Some(s2) = self.rp_reduce_nat(&sn) {
-                return Ok(self.rp_is_def_eq_s(tn, s2));
+            if let Some(s2) = self.nc_reduce_nat(&sn) {
+                return Ok(self.nc_is_def_eq_s(tn, s2));
             }
         }
-        self.rp_check_native(&tn);
-        self.rp_check_native(&sn);
-        let dt = self.rp_delta_hint(tn.head.e);
-        let ds = self.rp_delta_hint(sn.head.e);
+        self.nc_check_native(&tn);
+        self.nc_check_native(&sn);
+        let dt = self.nc_delta_hint(tn.head.e);
+        let ds = self.nc_delta_hint(sn.head.e);
         match (dt, ds) {
             (None, None) => Err((tn, sn)),
             (Some(_), None) => {
-                if let Some(s2) = self.rp_try_unfold_proj_app(&sn) {
-                    return self.rp_lazy_delta(tn, s2, fuel - 1);
+                if let Some(s2) = self.nc_try_unfold_proj_app(&sn) {
+                    return self.nc_lazy_delta(tn, s2, fuel - 1);
                 }
-                let t2 = self.rp_delta1(&tn);
-                self.rp_lazy_delta(t2, sn, fuel - 1)
+                let t2 = self.nc_delta1(&tn);
+                self.nc_lazy_delta(t2, sn, fuel - 1)
             }
             (None, Some(_)) => {
-                if let Some(t2) = self.rp_try_unfold_proj_app(&tn) {
-                    return self.rp_lazy_delta(t2, sn, fuel - 1);
+                if let Some(t2) = self.nc_try_unfold_proj_app(&tn) {
+                    return self.nc_lazy_delta(t2, sn, fuel - 1);
                 }
-                let s2 = self.rp_delta1(&sn);
-                self.rp_lazy_delta(tn, s2, fuel - 1)
+                let s2 = self.nc_delta1(&sn);
+                self.nc_lazy_delta(tn, s2, fuel - 1)
             }
             (Some(ht), Some(hs)) => {
                 if ht.is_lt(&hs) {
-                    let s2 = self.rp_delta1(&sn);
-                    self.rp_lazy_delta(tn, s2, fuel - 1)
+                    let s2 = self.nc_delta1(&sn);
+                    self.nc_lazy_delta(tn, s2, fuel - 1)
                 } else if hs.is_lt(&ht) {
-                    let t2 = self.rp_delta1(&tn);
-                    self.rp_lazy_delta(t2, sn, fuel - 1)
+                    let t2 = self.nc_delta1(&tn);
+                    self.nc_lazy_delta(t2, sn, fuel - 1)
                 } else {
                     // same head, regular hints: try spine comparison
                     if !tn.spine.is_empty() && !sn.spine.is_empty() {
@@ -1483,7 +1483,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                                     Const { name: c2, levels: l2, .. },
                                 ) => {
                                     if c1 == c2 && matches!(ht, ReducibilityHint::Regular(_)) {
-                                        self.rp_lvl_eq_list(l1, l2)
+                                        self.nc_lvl_eq_list(l1, l2)
                                     } else {
                                         false
                                     }
@@ -1491,9 +1491,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                                 _ => false,
                             };
                         if same_const {
-                            let saved = self.rp_probe_enter(SPEC_BUDGET);
-                            let r = self.rp_def_eq_spines(&tn, &sn);
-                            let aborted = self.rp_probe_exit(saved);
+                            let saved = self.nc_probe_enter(SPEC_BUDGET);
+                            let r = self.nc_def_eq_spines(&tn, &sn);
+                            let aborted = self.nc_probe_exit(saved);
                             if r && !aborted {
                                 return Ok(true);
                             }
@@ -1504,9 +1504,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                             }
                         }
                     }
-                    let t2 = self.rp_delta1(&tn);
-                    let s2 = self.rp_delta1(&sn);
-                    self.rp_lazy_delta(t2, s2, fuel - 1)
+                    let t2 = self.nc_delta1(&tn);
+                    let s2 = self.nc_delta1(&sn);
+                    self.nc_lazy_delta(t2, s2, fuel - 1)
                 }
             }
         }
@@ -1514,11 +1514,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// If the head is a projection, resolve it by full whnf_core; the
     /// baseline's tryUnfoldProjApp in the one-sided lazy-delta cases.
-    fn rp_try_unfold_proj_app(&mut self, s: &SClo<'t>) -> Option<SClo<'t>> {
+    fn nc_try_unfold_proj_app(&mut self, s: &SClo<'t>) -> Option<SClo<'t>> {
         if !matches!(self.ctx.read_expr(s.head.e), Proj { .. }) {
             return None;
         }
-        let r = self.rp_whnf_core(s.clone());
+        let r = self.nc_whnf_core(s.clone());
         if r.head == s.head && r.spine == s.spine {
             None
         } else {
@@ -1526,12 +1526,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn rp_delta1(&mut self, x: &SClo<'t>) -> SClo<'t> {
-        let u = self.rp_unfold_definition(x).expect("delta on non-unfoldable");
-        self.rp_whnf_core_ext(u, false, true)
+    fn nc_delta1(&mut self, x: &SClo<'t>) -> SClo<'t> {
+        let u = self.nc_unfold_definition(x).expect("delta on non-unfoldable");
+        self.nc_whnf_core_ext(u, false, true)
     }
 
-    fn rp_check_native(&self, s: &SClo<'t>) {
+    fn nc_check_native(&self, s: &SClo<'t>) {
         if let Const { name, .. } = self.ctx.read_expr(s.head.e) {
             let nc = &self.ctx.export_file.name_cache;
             if Some(name) == nc.reduce_bool || Some(name) == nc.reduce_nat {
@@ -1540,14 +1540,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn rp_try_eta_expansion(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> bool {
-        if self.rp_try_eta_core(t, s) {
+    fn nc_try_eta_expansion(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> bool {
+        if self.nc_try_eta_core(t, s) {
             return true;
         }
-        self.rp_try_eta_core(s, t)
+        self.nc_try_eta_core(s, t)
     }
 
-    fn rp_try_eta_core(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> bool {
+    fn nc_try_eta_core(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> bool {
         let t_is_lam =
             matches!(self.ctx.read_expr(t.head.e), Lambda { .. }) && t.spine.is_empty();
         let s_is_lam =
@@ -1555,38 +1555,38 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if !t_is_lam || s_is_lam {
             return false;
         }
-        let s_ty = self.rp_infer_s(s, InferOnly);
-        let s_ty_w = self.rp_whnf_clo(Clo::of(s_ty));
+        let s_ty = self.nc_infer_s(s, InferOnly);
+        let s_ty_w = self.nc_whnf_clo(Clo::of(s_ty));
         if !s_ty_w.spine.is_empty() {
             return false;
         }
         let Pi { binder_type: dom, .. } = self.ctx.read_expr(s_ty_w.head.e) else {
             return false;
         };
-        let d = self.rp_reify(Clo { e: dom, env: s_ty_w.head.env });
+        let d = self.nc_reify(Clo { e: dom, env: s_ty_w.head.env });
         let level = self
-            .rp_next_level(t.head.e, t.head.env)
-            .max(self.rp_next_level(s.head.e, s.head.env))
-            .max(self.rp_max_level(d));
-        let fv = self.rp_fvar_at(level, d);
+            .nc_next_level(t.head.e, t.head.env)
+            .max(self.nc_next_level(s.head.e, s.head.env))
+            .max(self.nc_max_level(d));
+        let fv = self.nc_fvar_at(level, d);
         let Lambda { body: t_body, .. } = self.ctx.read_expr(t.head.e) else {
             return false;
         };
-        let tenv = self.rp_push_entry(t.head.env, Entry::Neu(fv));
+        let tenv = self.nc_push_entry(t.head.env, Entry::Neu(fv));
         let mut s_applied = s.clone();
         s_applied.spine.push(Clo::of(fv));
-        let lhs = self.rp_mk_sclo(Clo { e: t_body, env: tenv });
-        self.rp_is_def_eq_s(lhs, s_applied)
+        let lhs = self.nc_mk_sclo(Clo { e: t_body, env: tenv });
+        self.nc_is_def_eq_s(lhs, s_applied)
     }
 
-    fn rp_try_eta_struct(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> bool {
-        if self.rp_try_eta_struct_core(t, s) {
+    fn nc_try_eta_struct(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> bool {
+        if self.nc_try_eta_struct_core(t, s) {
             return true;
         }
-        self.rp_try_eta_struct_core(s, t)
+        self.nc_try_eta_struct_core(s, t)
     }
 
-    fn rp_try_eta_struct_core(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> bool {
+    fn nc_try_eta_struct_core(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> bool {
         let ctor = match self.ctx.read_expr(s.head.e) {
             Const { name, .. } => name,
             _ => return false,
@@ -1601,24 +1601,24 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if !self.env.can_be_struct(&induct) {
             return false;
         }
-        let t_ty = self.rp_infer_s(t, InferOnly);
-        let s_ty = self.rp_infer_s(s, InferOnly);
-        if !self.rp_is_def_eq(Clo::of(t_ty), Clo::of(s_ty)) {
+        let t_ty = self.nc_infer_s(t, InferOnly);
+        let s_ty = self.nc_infer_s(s, InferOnly);
+        if !self.nc_is_def_eq(Clo::of(t_ty), Clo::of(s_ty)) {
             return false;
         }
-        let t_clo = self.rp_sclo_as_clo(t);
+        let t_clo = self.nc_sclo_as_clo(t);
         for i in num_params..(num_params + num_fields) {
             let bv = self.ctx.mk_var(0);
             let proj = self.ctx.mk_proj(induct, (i - num_params) as usize, bv);
-            let env = self.rp_push_entry(ENV_NIL, Entry::Val(t_clo.e, t_clo.env));
-            if !self.rp_is_def_eq(Clo { e: proj, env }, s.spine[i as usize]) {
+            let env = self.nc_push_entry(ENV_NIL, Entry::Val(t_clo.e, t_clo.env));
+            if !self.nc_is_def_eq(Clo { e: proj, env }, s.spine[i as usize]) {
                 return false;
             }
         }
         true
     }
 
-    fn rp_def_eq_string_lit(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> bool {
+    fn nc_def_eq_string_lit(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> bool {
         fn core<'x, 't: 'x, 'p: 't>(
             ck: &mut TypeChecker<'x, 't, 'p>,
             t: &SClo<'t>,
@@ -1637,8 +1637,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let Some(e) = ck.ctx.str_lit_to_constructor(sp) else {
                 return false;
             };
-            let lhs = ck.rp_mk_sclo(Clo::of(e));
-            ck.rp_is_def_eq_s(lhs, s.clone())
+            let lhs = ck.nc_mk_sclo(Clo::of(e));
+            ck.nc_is_def_eq_s(lhs, s.clone())
         }
         if core(self, t, s) {
             return true;
@@ -1646,9 +1646,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         core(self, s, t)
     }
 
-    fn rp_def_eq_unit_like(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> bool {
-        let t_ty = self.rp_infer_s(t, InferOnly);
-        let ty_w = self.rp_whnf_clo(Clo::of(t_ty));
+    fn nc_def_eq_unit_like(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> bool {
+        let t_ty = self.nc_infer_s(t, InferOnly);
+        let ty_w = self.nc_whnf_clo(Clo::of(t_ty));
         let i = match self.ctx.read_expr(ty_w.head.e) {
             Const { name, .. } => name,
             _ => return false,
@@ -1667,16 +1667,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             Some(cd) if cd.num_fields == 0 => {}
             _ => return false,
         }
-        let ty_clo = self.rp_sclo_as_clo(&ty_w);
-        let s_ty = self.rp_infer_s(s, InferOnly);
-        self.rp_is_def_eq(ty_clo, Clo::of(s_ty))
+        let ty_clo = self.nc_sclo_as_clo(&ty_w);
+        let s_ty = self.nc_infer_s(s, InferOnly);
+        self.nc_is_def_eq(ty_clo, Clo::of(s_ty))
     }
 
     /// Could `ty` be a proposition? A universe parameter stands for a level
     /// that an instantiation may send to zero, so it counts.
-    fn rp_may_be_prop(&mut self, ty: ExprPtr<'t>) -> bool {
-        let sort = self.rp_infer(Clo::of(ty), InferOnly);
-        let w = self.rp_whnf_clo(Clo::of(sort));
+    fn nc_may_be_prop(&mut self, ty: ExprPtr<'t>) -> bool {
+        let sort = self.nc_infer(Clo::of(ty), InferOnly);
+        let w = self.nc_whnf_clo(Clo::of(sort));
         w.spine.is_empty()
             && match self.ctx.read_expr(w.head.e) {
                 Sort { level, .. } => self.ctx.may_be_prop(level),
@@ -1685,9 +1685,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     /// Is `ty` a proposition, i.e. `ty : Prop`?
-    fn rp_is_prop(&mut self, ty: ExprPtr<'t>) -> bool {
-        let sort = self.rp_infer(Clo::of(ty), InferOnly);
-        let w = self.rp_whnf_clo(Clo::of(sort));
+    fn nc_is_prop(&mut self, ty: ExprPtr<'t>) -> bool {
+        let sort = self.nc_infer(Clo::of(ty), InferOnly);
+        let w = self.nc_whnf_clo(Clo::of(sort));
         w.spine.is_empty()
             && match self.ctx.read_expr(w.head.e) {
                 Sort { level, .. } => self.ctx.is_zero(level),
@@ -1697,25 +1697,25 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     // ---- inference ----
 
-    pub(crate) fn rp_infer(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
-        let d = self.rp_probe_suspend();
-        let r = self.rp_infer_go(c, flag);
-        self.rp_probe_resume(d);
+    pub(crate) fn nc_infer(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
+        let d = self.nc_probe_suspend();
+        let r = self.nc_infer_go(c, flag);
+        self.nc_probe_resume(d);
         r
     }
 
-    fn rp_infer_go(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    fn nc_infer_go(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
         self.ctx.rp.ctrs[0] += 1;
         let n = self.ctx.read_expr(c.e);
         match n {
-            Var { dbj_idx, .. } => match self.rp_lookup(c.env, dbj_idx) {
+            Var { dbj_idx, .. } => match self.nc_lookup(c.env, dbj_idx) {
                 Entry::Neu(fv) => {
                     self.ctx.rp.ctrs[19] += 1;
-                    self.rp_fvar_type(fv)
+                    self.nc_fvar_type(fv)
                 }
                 Entry::Val(e2, env2) => {
                     self.ctx.rp.ctrs[18] += 1;
-                    self.rp_infer(Clo { e: e2, env: env2 }, flag)
+                    self.nc_infer(Clo { e: e2, env: env2 }, flag)
                 }
             },
             Local { binder_type, .. } => {
@@ -1725,7 +1725,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             Sort { level, .. } => {
                 self.ctx.rp.ctrs[21] += 1;
                 if flag == Check {
-                    self.rp_check_level(level);
+                    self.nc_check_level(level);
                 }
                 let l2 = self.ctx.succ(level);
                 self.ctx.mk_sort(l2)
@@ -1737,16 +1737,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         if flag == Check {
                             // checks still run per occurrence, instantiation reused
                             for l in self.ctx.read_levels(levels).iter().copied() {
-                                self.rp_check_level(l);
+                                self.nc_check_level(l);
                             }
                         }
                         return r;
                     }
-                    let r = self.rp_infer_const(name, levels, flag);
+                    let r = self.nc_infer_const(name, levels, flag);
                     self.ctx.rp.g_inst_ty.insert(c.e, r);
                     return r;
                 }
-                self.rp_infer_const(name, levels, flag)
+                self.nc_infer_const(name, levels, flag)
             }
             NatLit { .. } => {
                 assert!(self.ctx.export_file.config.nat_extension);
@@ -1757,7 +1757,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 self.ctx.string_type().unwrap()
             }
             Lambda { .. } | Pi { .. } | Let { .. } | App { .. } | Proj { .. } => {
-                let key = self.rp_key(c);
+                let key = self.nc_key(c);
                 let cached = match flag {
                     Check => self.ctx.rp.infer_cache_check.get(&key),
                     InferOnly => self.ctx.rp.infer_cache_only.get(&key),
@@ -1768,15 +1768,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
                 self.ctx.rp.ctrs[17] += 1;
                 let r = match n {
-                    Lambda { .. } => self.rp_infer_lambda(c, flag),
-                    Pi { .. } => self.rp_infer_pi(c, flag),
-                    Let { .. } => self.rp_infer_let(c, flag),
+                    Lambda { .. } => self.nc_infer_lambda(c, flag),
+                    Pi { .. } => self.nc_infer_pi(c, flag),
+                    Let { .. } => self.nc_infer_let(c, flag),
                     App { .. } => {
-                        let s = self.rp_mk_sclo(c);
-                        self.rp_infer_s(&s, flag)
+                        let s = self.nc_mk_sclo(c);
+                        self.nc_infer_s(&s, flag)
                     }
                     Proj { ty_name, idx, structure, .. } => {
-                        self.rp_infer_proj(ty_name, idx, Clo { e: structure, env: c.env }, flag)
+                        self.nc_infer_proj(ty_name, idx, Clo { e: structure, env: c.env }, flag)
                     }
                     _ => unreachable!(),
                 };
@@ -1790,7 +1790,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     /// every universe parameter must be bound in the enclosing declaration
-    fn rp_check_level(&mut self, l: LevelPtr<'t>) {
+    fn nc_check_level(&mut self, l: LevelPtr<'t>) {
         if let Some(di) = self.declar_info {
             assert!(
                 self.ctx.all_uparams_defined(l, di.uparams),
@@ -1799,7 +1799,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn rp_infer_const(
+    fn nc_infer_const(
         &mut self,
         name: NamePtr<'t>,
         levels: LevelsPtr<'t>,
@@ -1816,17 +1816,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         );
         if flag == Check {
             for l in self.ctx.read_levels(levels).iter().copied() {
-                self.rp_check_level(l);
+                self.nc_check_level(l);
             }
         }
         self.ctx.subst_declar_info_levels(info, levels)
     }
 
-    fn rp_ensure_sort(&mut self, ty: ExprPtr<'t>) -> LevelPtr<'t> {
+    fn nc_ensure_sort(&mut self, ty: ExprPtr<'t>) -> LevelPtr<'t> {
         if let Sort { level, .. } = self.ctx.read_expr(ty) {
             return level;
         }
-        let w = self.rp_whnf_clo(Clo::of(ty));
+        let w = self.nc_whnf_clo(Clo::of(ty));
         if w.spine.is_empty() {
             if let Sort { level, .. } = self.ctx.read_expr(w.head.e) {
                 return level;
@@ -1835,7 +1835,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         panic!("type expected")
     }
 
-    fn rp_infer_lambda(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    fn nc_infer_lambda(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
         // The whole run of binders is opened before the body is inferred, so
         // the fvars standing for them are abstracted out of the inferred type
         // in one traversal rather than one traversal per binder.
@@ -1846,22 +1846,22 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         while let Lambda { binder_name, binder_style, binder_type, body, .. } =
             self.ctx.read_expr(e)
         {
-            let d = self.rp_reify(Clo { e: binder_type, env });
+            let d = self.nc_reify(Clo { e: binder_type, env });
             if flag == Check {
-                let dty = self.rp_infer(Clo::of(d), flag);
-                self.rp_ensure_sort(dty);
+                let dty = self.nc_infer(Clo::of(d), flag);
+                self.nc_ensure_sort(dty);
             }
-            let level = self.rp_next_level(e, env).max(self.rp_max_level(d));
+            let level = self.nc_next_level(e, env).max(self.nc_max_level(d));
             if binders.is_empty() {
                 start = level;
             }
-            let fv = self.rp_fvar_at(level, d);
-            env = self.rp_push_entry(env, Entry::Neu(fv));
+            let fv = self.nc_fvar_at(level, d);
+            env = self.nc_push_entry(env, Entry::Neu(fv));
             binders.push((binder_name, binder_style, d));
             e = body;
         }
-        let bt = self.rp_infer(Clo { e, env }, flag);
-        let bt = self.rp_cheap_beta_reduce(bt);
+        let bt = self.nc_infer(Clo { e, env }, flag);
+        let bt = self.nc_cheap_beta_reduce(bt);
         let n = u32::try_from(binders.len()).unwrap();
         let mut r = self.ctx.abstr_levels_at(bt, start, start + n);
         for (i, (binder_name, binder_style, d)) in binders.into_iter().enumerate().rev() {
@@ -1872,18 +1872,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         r
     }
 
-    fn rp_infer_pi(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    fn nc_infer_pi(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
         let Pi { binder_type, body, .. } = self.ctx.read_expr(c.e) else {
             unreachable!()
         };
-        let d = self.rp_reify(Clo { e: binder_type, env: c.env });
-        let dty = self.rp_infer(Clo::of(d), flag);
-        let u = self.rp_ensure_sort(dty);
-        let level = self.rp_next_level(c.e, c.env).max(self.rp_max_level(d));
-        let fv = self.rp_fvar_at(level, d);
-        let env2 = self.rp_push_entry(c.env, Entry::Neu(fv));
-        let bt = self.rp_infer(Clo { e: body, env: env2 }, flag);
-        let s = self.rp_ensure_sort(bt);
+        let d = self.nc_reify(Clo { e: binder_type, env: c.env });
+        let dty = self.nc_infer(Clo::of(d), flag);
+        let u = self.nc_ensure_sort(dty);
+        let level = self.nc_next_level(c.e, c.env).max(self.nc_max_level(d));
+        let fv = self.nc_fvar_at(level, d);
+        let env2 = self.nc_push_entry(c.env, Entry::Neu(fv));
+        let bt = self.nc_infer(Clo { e: body, env: env2 }, flag);
+        let s = self.nc_ensure_sort(bt);
         // mkLevelIMax': imax with immediate simplifications
         let lvl = self.ctx.imax(u, s);
         let lvl = self.ctx.simplify(lvl);
@@ -1891,34 +1891,34 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
 
-    fn rp_infer_let(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    fn nc_infer_let(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
         let Let { binder_type, val, body, .. } = self.ctx.read_expr(c.e) else {
             unreachable!()
         };
-        let t = self.rp_reify(Clo { e: binder_type, env: c.env });
+        let t = self.nc_reify(Clo { e: binder_type, env: c.env });
         if flag == Check {
-            let tty = self.rp_infer(Clo::of(t), flag);
-            self.rp_ensure_sort(tty);
-            let vty = self.rp_infer(Clo { e: val, env: c.env }, flag);
+            let tty = self.nc_infer(Clo::of(t), flag);
+            self.nc_ensure_sort(tty);
+            let vty = self.nc_infer(Clo { e: val, env: c.env }, flag);
             assert!(
-                self.rp_is_def_eq(Clo::of(vty), Clo::of(t)),
+                self.nc_is_def_eq(Clo::of(vty), Clo::of(t)),
                 "let type mismatch"
             );
         }
-        let env2 = self.rp_push_entry(c.env, Entry::Val(val, c.env));
-        self.rp_infer(Clo { e: body, env: env2 }, flag)
+        let env2 = self.nc_push_entry(c.env, Entry::Val(val, c.env));
+        self.nc_infer(Clo { e: body, env: env2 }, flag)
     }
 
-    pub(crate) fn rp_infer_s(&mut self, s: &SClo<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    pub(crate) fn nc_infer_s(&mut self, s: &SClo<'t>, flag: InferFlag) -> ExprPtr<'t> {
         if s.spine.is_empty() {
-            return self.rp_infer(s.head, flag);
+            return self.nc_infer(s.head, flag);
         }
-        let mut f_ty: Clo<'t> = Clo::of(self.rp_infer(s.head, flag));
+        let mut f_ty: Clo<'t> = Clo::of(self.nc_infer(s.head, flag));
         for &arg in s.spine.iter() {
             let fw = if matches!(self.ctx.read_expr(f_ty.e), Pi { .. }) {
                 SClo { head: f_ty, spine: SpineVec::new() }
             } else {
-                self.rp_whnf_clo(f_ty)
+                self.nc_whnf_clo(f_ty)
             };
             let Pi { binder_type: dom, body, .. } = self.ctx.read_expr(fw.head.e) else {
                 panic!("function expected");
@@ -1927,7 +1927,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 panic!("function expected");
             }
             if flag == Check {
-                let a_ty = self.rp_infer(arg, flag);
+                let a_ty = self.nc_infer(arg, flag);
                 // `@eagerReduce A a` in argument position asks for the
                 // comparison to reduce without waiting for both sides to be
                 // free of free variables.
@@ -1935,26 +1935,26 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 if self.ctx.is_eager_reduce_app(arg.e) {
                     self.ctx.eager_mode = true;
                 }
-                let ok = self.rp_is_def_eq(Clo { e: dom, env: fw.head.env }, Clo::of(a_ty));
+                let ok = self.nc_is_def_eq(Clo { e: dom, env: fw.head.env }, Clo::of(a_ty));
                 self.ctx.eager_mode = outer_eager;
                 assert!(ok, "application type mismatch");
             }
-            let env2 = self.rp_push_entry(fw.head.env, Entry::Val(arg.e, arg.env));
+            let env2 = self.nc_push_entry(fw.head.env, Entry::Val(arg.e, arg.env));
             f_ty = Clo { e: body, env: env2 };
         }
-        let r = self.rp_reify(f_ty);
+        let r = self.nc_reify(f_ty);
         r
     }
 
-    fn rp_infer_proj(
+    fn nc_infer_proj(
         &mut self,
         type_name: NamePtr<'t>,
         idx: usize,
         strukt: Clo<'t>,
         flag: InferFlag,
     ) -> ExprPtr<'t> {
-        let s_ty = self.rp_infer(strukt, flag);
-        let st_w = self.rp_whnf_clo(Clo::of(s_ty));
+        let s_ty = self.nc_infer(strukt, flag);
+        let st_w = self.nc_whnf_clo(Clo::of(s_ty));
         let (i_name, i_levels) = match self.ctx.read_expr(st_w.head.e) {
             Const { name, levels, .. } => (name, levels),
             _ => panic!("invalid projection"),
@@ -1977,49 +1977,49 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let c_ty = self.ctx.subst_declar_info_levels(ctor_info, i_levels);
         let mut r = Clo::of(c_ty);
         for pi in 0..num_params as usize {
-            let rw = self.rp_whnf_clo(r);
+            let rw = self.nc_whnf_clo(r);
             let Pi { body, .. } = self.ctx.read_expr(rw.head.e) else {
                 panic!("invalid projection");
             };
             assert!(rw.spine.is_empty(), "invalid projection");
             let p = st_w.spine[pi];
-            let env2 = self.rp_push_entry(rw.head.env, Entry::Val(p.e, p.env));
+            let env2 = self.nc_push_entry(rw.head.env, Entry::Val(p.e, p.env));
             r = Clo { e: body, env: env2 };
         }
-        let is_prop_ty = self.rp_may_be_prop(s_ty);
+        let is_prop_ty = self.nc_may_be_prop(s_ty);
         for fi in 0..idx {
-            let rw = self.rp_whnf_clo(r);
+            let rw = self.nc_whnf_clo(r);
             let Pi { binder_type: dom, body, .. } = self.ctx.read_expr(rw.head.e) else {
                 panic!("invalid projection");
             };
             assert!(rw.spine.is_empty(), "invalid projection");
             if self.lbr(body) > 0 && is_prop_ty {
-                let d = self.rp_reify(Clo { e: dom, env: rw.head.env });
-                assert!(self.rp_is_prop(d), "infer_proj prop");
+                let d = self.nc_reify(Clo { e: dom, env: rw.head.env });
+                assert!(self.nc_is_prop(d), "infer_proj prop");
             }
             let bv = self.ctx.mk_var(0);
             let proj = self.ctx.mk_proj(i_name, fi, bv);
-            let senv = self.rp_push_entry(ENV_NIL, Entry::Val(strukt.e, strukt.env));
-            let env2 = self.rp_push_entry(rw.head.env, Entry::Val(proj, senv));
+            let senv = self.nc_push_entry(ENV_NIL, Entry::Val(strukt.e, strukt.env));
+            let env2 = self.nc_push_entry(rw.head.env, Entry::Val(proj, senv));
             r = Clo { e: body, env: env2 };
         }
-        let rw = self.rp_whnf_clo(r);
+        let rw = self.nc_whnf_clo(r);
         let Pi { binder_type: dom, .. } = self.ctx.read_expr(rw.head.e) else {
             panic!("invalid projection");
         };
         assert!(rw.spine.is_empty(), "invalid projection");
         if is_prop_ty {
-            let d = self.rp_reify(Clo { e: dom, env: rw.head.env });
-            assert!(self.rp_is_prop(d), "infer_proj prop");
+            let d = self.nc_reify(Clo { e: dom, env: rw.head.env });
+            assert!(self.nc_is_prop(d), "infer_proj prop");
         }
-        self.rp_reify(Clo { e: dom, env: rw.head.env })
+        self.nc_reify(Clo { e: dom, env: rw.head.env })
     }
 
-    fn rp_cheap_beta_reduce(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
+    fn nc_cheap_beta_reduce(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
         if !matches!(self.ctx.read_expr(e), App { .. }) {
             return e;
         }
-        let s = self.rp_mk_sclo(Clo::of(e));
+        let s = self.nc_mk_sclo(Clo::of(e));
         let mut fun = s.head.e;
         let mut i = 0usize;
         while i < s.spine.len() {
@@ -2052,10 +2052,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     // ---- adapters for nanoda entry points ----
 
-    pub(crate) fn rp_sclo_to_expr(&mut self, s: &SClo<'t>) -> ExprPtr<'t> {
-        let mut out = self.rp_reify(s.head);
+    pub(crate) fn nc_sclo_to_expr(&mut self, s: &SClo<'t>) -> ExprPtr<'t> {
+        let mut out = self.nc_reify(s.head);
         for &c in s.spine.iter() {
-            let a = self.rp_reify(c);
+            let a = self.nc_reify(c);
             out = self.ctx.mk_app(out, a);
         }
         out
