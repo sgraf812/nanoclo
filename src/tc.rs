@@ -1028,11 +1028,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return false;
         }
         let (tk, sk) = (self.norm_clo(t), self.norm_clo(s));
-        let (tkey, skey) = (self.key(tk), self.key(sk));
-        if self.ctx.rp.eq_pos.known_eq(&tkey, &skey) {
-            self.ctx.rp.ctrs[6] += 1;
-            return true;
-        }
+        // A pair that keys globally is answered from the global tables; the
+        // projected closure key is neither consulted nor built for it.
         if let (Some(a), Some(b)) = (self.global_key(tk), self.global_key(sk)) {
             let gpk = if a.get_hash() <= b.get_hash() { (a, b) } else { (b, a) };
             if self.ctx.rp.g_eq_pos.known_eq(&a, &b) {
@@ -1053,6 +1050,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 self.ctx.rp.g_eq_neg.insert(gpk);
             }
             return r;
+        }
+        let (tkey, skey) = (self.key(tk), self.key(sk));
+        if self.ctx.rp.eq_pos.known_eq(&tkey, &skey) {
+            self.ctx.rp.ctrs[6] += 1;
+            return true;
         }
         let pk = if clo_le(&tkey, &skey) { (tkey, skey) } else { (skey, tkey) };
         if self.ctx.rp.eq_neg.contains(&pk)

@@ -243,19 +243,9 @@ impl<'t> CloState<'t> {
     }
 }
 
-fn proj_off() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("NANOCLO_NO_PROJ").is_ok())
-}
 
-
-/// Entry ceiling per memo table, tunable for experiments.
-fn ccap() -> usize {
-    static CCAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CCAP.get_or_init(|| {
-        std::env::var("NANOCLO_CCAP").ok().and_then(|v| v.parse().ok()).unwrap_or(1 << 20)
-    })
-}
+/// Entry ceiling per memo table.
+const CCAP: usize = 1 << 20;
 
 /// Two-generation memo: entries land in `new`; when it fills, `new` becomes
 /// `old` and a fresh `new` starts. A hit in `old` is promoted, so entries
@@ -282,7 +272,7 @@ impl<K: std::hash::Hash + Eq + Copy, V: Copy> Gen2<K, V> {
 
     #[inline]
     pub(crate) fn insert(&mut self, k: K, v: V) {
-        if self.new.len() >= ccap() {
+        if self.new.len() >= CCAP {
             std::mem::swap(&mut self.new, &mut self.old);
             self.new.clear();
         }
@@ -512,44 +502,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if c.env == ENV_NIL {
             return c;
         }
-        if proj_off() {
-            return if self.lbr(c.e) == 0 { Clo::of(c.e) } else { c };
-        }
         let mask = match self.uses_mask(c.e) {
             Uses::Mask(0) => return Clo::of(c.e),
             Uses::Mask(m) => m,
             Uses::Dense | Uses::Wide => return c,
         };
-        if let Some(&env) = self.ctx.rp.proj_cache.get(&(mask, c.env)) {
-            return Clo { e: c.e, env };
-        }
-        // Every index in the mask is below 64, so the entries it names sit
-        // within the first 64 links: one walk collects them all.
-        let mut picked: [Option<Entry<'t>>; 64] = [None; 64];
-        let mut cur = c.env;
-        for d in 0..64 {
-            if cur == ENV_NIL {
-                break;
-            }
-            let node = &self.ctx.rp.envs[cur as usize];
-            if mask & (1u64 << d) != 0 {
-                picked[d] = Some(node.entry);
-            }
-            if mask >> d == 1 {
-                break;
-            }
-            cur = node.parent;
-        }
-        let mut proj = ENV_NIL;
-        let mut m = mask;
-        while m != 0 {
-            let i = m.trailing_zeros() as usize;
-            m &= m - 1;
-            let entry = picked[i].expect("projection: index outside the environment");
-            proj = self.push_entry(proj, entry);
-        }
-        self.ctx.rp.proj_cache.insert((mask, c.env), proj);
-        Clo { e: c.e, env: proj }
+        Clo { e: c.e, env: self.project(mask, c.env) }
     }
 
     /// The environment `e` reads through, when `e` sits under `off` binders
@@ -564,12 +522,22 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             Uses::Mask(_) => 0,
             Uses::Dense | Uses::Wide => return env,
         };
+        self.project(mask, env)
+    }
+    /// The environment cut down to the entries a read set names, rebuilt so
+    /// that environments agreeing on those entries become the same one.
+    /// Yields `env` untouched when the set names an entry the environment
+    /// does not have: that is a coarser key rather than a wrong one, and a
+    /// term whose variables really do escape is caught by `lookup`.
+    fn project(&mut self, mask: u64, env: EnvId) -> EnvId {
         if mask == 0 {
             return ENV_NIL;
         }
         if let Some(&p) = self.ctx.rp.proj_cache.get(&(mask, env)) {
             return p;
         }
+        // Every index in the mask is below 64, so the entries it names sit
+        // within the first 64 links: one walk collects them all.
         let mut picked: [Option<Entry<'t>>; 64] = [None; 64];
         let mut cur = env;
         for d in 0..64 {
@@ -596,6 +564,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.ctx.rp.proj_cache.insert((mask, env), proj);
         proj
     }
+
 
     /// Cache-key normalization: resolve bvar heads to the entry they denote;
     /// a closed result drops its environment.
