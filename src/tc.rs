@@ -143,6 +143,11 @@ impl<'p> ExportFile<'p> {
                             } else {
                                 self.check_declar_in(ctx, declar);
                             }
+                            if std::env::var("NANOCLO_DECLCTRS").is_ok() {
+                                let c = &ctx.rp.ctrs;
+                                let name = self.with_ctx(|cc| format!("{:?}", cc.debug_print(declar.info().name)));
+                                eprintln!("DC\t{}\t{}\t{}\t{}\t{}", i, name, c[1], c[3], c[0]);
+                            }
                             ctx.rp.flush_ctrs();
                         }
                     })
