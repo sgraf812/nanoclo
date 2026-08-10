@@ -12,7 +12,6 @@
 
 use crate::expr::{BinderStyle, Expr};
 use crate::tc::TypeChecker;
-use crate::union_find::UnionFind;
 use crate::util::{
     new_fx_hash_map, new_fx_hash_set, ExprPtr, FxHashMap, FxHashSet,
 };
@@ -50,8 +49,6 @@ pub(crate) struct Clo<'t> {
 
 impl<'t> Clo<'t> {
     pub(crate) fn of(e: ExprPtr<'t>) -> Clo<'t> { Clo { e, env: ENV_NIL } }
-    #[inline]
-    fn okey(&self) -> (u64, u32) { (self.e.get_hash(), self.env) }
 }
 
 /// Spines are short in practice, so they live inline until they are not.
@@ -62,8 +59,6 @@ pub(crate) struct SClo<'t> {
     pub head: Clo<'t>,
     pub spine: SpineVec<'t>,
 }
-
-pub(crate) fn clo_le(a: &Clo, b: &Clo) -> bool { a.okey() <= b.okey() }
 
 /// Injective packing of an environment-extension request into two words
 /// (pointer raw bits are 32-bit).
@@ -94,19 +89,12 @@ pub(crate) struct CloState<'t> {
 
     pub(crate) infer_cache_check: FxHashMap<Clo<'t>, ExprPtr<'t>>,
     pub(crate) infer_cache_only: FxHashMap<Clo<'t>, ExprPtr<'t>>,
-    pub(crate) whnf_cache: FxHashMap<Clo<'t>, SClo<'t>>,
-    pub(crate) eq_pos: UnionFind<Clo<'t>>,
-    pub(crate) eq_neg: FxHashSet<(Clo<'t>, Clo<'t>)>,
     pub(crate) reify_go_cache: Gen2<(ExprPtr<'t>, EnvId, u16), ExprPtr<'t>>,
     /// `e -> one past the highest de Bruijn level of an fvar occurring in it`
     pub(crate) lvl_cache: FxHashMap<ExprPtr<'t>, u32>,
     /// `type expr -> whether it is a proposition`; proof irrelevance asks
     /// this of the same few types once per comparison.
     pub(crate) prop_cache: FxHashMap<ExprPtr<'t>, bool>,
-    /// `(head, env, spine length) -> whether the application is a proof`.
-    /// The sort of an application's type is a level, and a level never
-    /// mentions a term, so the arguments cannot move the answer.
-    pub(crate) proof_cache: FxHashMap<(ExprPtr<'t>, EnvId, u32), bool>,
     /// `e -> the loose bvar indices it reads`
     pub(crate) umask_cache: FxHashMap<ExprPtr<'t>, Uses>,
     /// `(read set, env) -> that environment projected onto that set`. The
@@ -115,7 +103,6 @@ pub(crate) struct CloState<'t> {
     pub(crate) proj_cache: FxHashMap<(u64, EnvId), EnvId>,
     /// keyed by the packed `(ae|aenv, be|benv, aoff|boff)` triple
     pub(crate) eq_mod_cache: Gen2<(u64, u64, u32), bool>,
-    pub(crate) clo_fvar_cache: Gen2<(ExprPtr<'t>, EnvId, u16), bool>,
 
     // Caches valid across declarations (per thread): keys and stored values
     // are closed (fvar-free, env-free) and refer only to constants visible at
@@ -126,22 +113,6 @@ pub(crate) struct CloState<'t> {
     pub(crate) g_unfold: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
     /// const expr -> its level-instantiated type
     pub(crate) g_inst_ty: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
-    pub(crate) g_eq_pos: UnionFind<ExprPtr<'t>>,
-    pub(crate) g_eq_neg: FxHashSet<(ExprPtr<'t>, ExprPtr<'t>)>,
-
-    /// How many conversion steps a speculative comparison may spend before
-    /// it is abandoned, 0 outside one.
-    pub(crate) probe_fuel: u64,
-    pub(crate) probe_depth: u32,
-    pub(crate) probe_aborted: bool,
-    /// Pairs found unequal while a speculative comparison was running. They
-    /// are answers only if that comparison finished, so they are held here
-    /// and moved into `eq_neg` when it does.
-    pub(crate) probe_neg: FxHashSet<(Clo<'t>, Clo<'t>)>,
-    /// `probe_neg` in the order it was filled, so a comparison that is
-    /// abandoned takes back exactly what it contributed.
-    pub(crate) probe_neg_log: Vec<(Clo<'t>, Clo<'t>)>,
-    pub(crate) probe_gneg: Vec<(ExprPtr<'t>, ExprPtr<'t>)>,
 
     /// diagnostic counters: [infer, whnf_core, whnf, def_eq, whnf_hit,
     /// whnf_miss, whnf_core_hit, whnf_core_miss, unfold_hit, unfold_miss,
@@ -183,27 +154,14 @@ impl<'t> CloState<'t> {
             env_intern: new_fx_hash_map(),
             infer_cache_check: new_fx_hash_map(),
             infer_cache_only: new_fx_hash_map(),
-            whnf_cache: new_fx_hash_map(),
-            eq_pos: UnionFind::new(),
-            eq_neg: new_fx_hash_set(),
             reify_go_cache: Gen2::new(),
             lvl_cache: new_fx_hash_map(),
             prop_cache: new_fx_hash_map(),
-            proof_cache: new_fx_hash_map(),
             umask_cache: new_fx_hash_map(),
             proj_cache: new_fx_hash_map(),
             eq_mod_cache: Gen2::new(),
-            clo_fvar_cache: Gen2::new(),
             g_unfold: new_fx_hash_map(),
             g_inst_ty: new_fx_hash_map(),
-            g_eq_pos: UnionFind::new(),
-            g_eq_neg: FxHashSet::with_capacity_and_hasher(1 << 16, Default::default()),
-            probe_fuel: 0,
-            probe_depth: 0,
-            probe_aborted: false,
-            probe_neg: new_fx_hash_set(),
-            probe_neg_log: Vec::new(),
-            probe_gneg: Vec::new(),
             ctrs: [0; 25],
         }
     }
@@ -239,22 +197,12 @@ impl<'t> CloState<'t> {
         rm(&mut self.env_intern);
         rm(&mut self.infer_cache_check);
         rm(&mut self.infer_cache_only);
-        rm(&mut self.whnf_cache);
-        self.eq_pos.clear();
-        rs(&mut self.eq_neg);
-        rs(&mut self.probe_neg);
-        self.probe_neg_log.clear();
-        self.probe_gneg.clear();
-        self.probe_depth = 0;
-        self.probe_aborted = false;
         self.reify_go_cache.reset_decl();
         rm(&mut self.lvl_cache);
         rm(&mut self.prop_cache);
-        rm(&mut self.proof_cache);
         rm(&mut self.umask_cache);
         rm(&mut self.proj_cache);
         self.eq_mod_cache.reset_decl();
-        self.clo_fvar_cache.reset_decl();
     }
 }
 
@@ -527,18 +475,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    /// key eligible for cross-declaration caches: env-free and fvar-free, and
-    /// no temporary environment extension is active (temporary declarations
-    /// must not leak into per-thread state)
-    #[inline]
-    pub(crate) fn global_key(&self, c: Clo<'t>) -> Option<ExprPtr<'t>> {
-        if c.env == ENV_NIL && !self.ctx.has_fvars(c.e) && !self.env.has_temp_ext() {
-            Some(c.e)
-        } else {
-            None
-        }
-    }
-
     /// The identity of a closure as a question: the expression together with
     /// the bindings that expression reads. Everything else in the environment
     /// is invisible to it, so closures differing only there ask the same
@@ -553,21 +489,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             Uses::Dense | Uses::Wide => return c,
         };
         Clo { e: c.e, env: self.project(mask, c.env) }
-    }
-
-    /// The environment `e` reads through, when `e` sits under `off` binders
-    /// entered since the comparison began: its own indices at or above `off`
-    /// name environment positions `i - off`.
-    pub(crate) fn proj_at(&mut self, e: ExprPtr<'t>, env: EnvId, off: u16) -> EnvId {
-        if env == ENV_NIL {
-            return env;
-        }
-        let mask = match self.uses_mask(e) {
-            Uses::Mask(m) if off < 64 => m >> off,
-            Uses::Mask(_) => 0,
-            Uses::Dense | Uses::Wide => return env,
-        };
-        self.project(mask, env)
     }
     /// The environment cut down to the entries a read set names, rebuilt so
     /// that environments agreeing on those entries become the same one.
@@ -689,10 +610,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     // ---- eqMod: structural equality modulo substitution ----
-
-    pub(crate) fn clo_eq(&mut self, t: Clo<'t>, s: Clo<'t>) -> bool {
-        self.eq_mod(t.e, t.env, 0, s.e, s.env, 0)
-    }
 
     pub(crate) fn eq_mod(
         &mut self,
@@ -824,18 +741,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return false;
         }
         e == fv
-    }
-
-    pub(crate) fn s_quick_eq(&mut self, t: &SClo<'t>, s: &SClo<'t>) -> bool {
-        if !self.clo_eq(t.head, s.head) || t.spine.len() != s.spine.len() {
-            return false;
-        }
-        for (&x, &y) in t.spine.iter().zip(s.spine.iter()) {
-            if !self.clo_eq(x, y) {
-                return false;
-            }
-        }
-        true
     }
 
     /// Follow bvar -> Val chains to their base. Neu entries resolve to the

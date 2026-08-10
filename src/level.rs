@@ -53,6 +53,15 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     pub fn simplify(&mut self, ptr: LevelPtr<'t>) -> LevelPtr<'t> {
+        if let Some(&r) = self.expr_cache.simplify_cache.get(&ptr) {
+            return r;
+        }
+        let r = self.simplify_go(ptr);
+        self.expr_cache.simplify_cache.insert(ptr, r);
+        r
+    }
+
+    fn simplify_go(&mut self, ptr: LevelPtr<'t>) -> LevelPtr<'t> {
         match self.read_level(ptr) {
             Zero | Param(..) => ptr,
             Succ(val, ..) => {
@@ -227,14 +236,24 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
     }
 
     pub fn leq(&mut self, l: LevelPtr<'t>, r: LevelPtr<'t>) -> bool {
+        if l == r {
+            return true;
+        }
         let l_prime = self.simplify(l);
         let r_prime = self.simplify(r);
         self.leq_core(l_prime, r_prime, 0)
     }
 
-    pub fn eq_antisymm(&mut self, l: LevelPtr<'t>, r: LevelPtr<'t>) -> bool { self.leq(l, r) && self.leq(r, l) }
+    /// Levels are interned, so equal pointers are the same level and the
+    /// antisymmetry argument is needed only for distinct ones.
+    pub fn eq_antisymm(&mut self, l: LevelPtr<'t>, r: LevelPtr<'t>) -> bool {
+        l == r || (self.leq(l, r) && self.leq(r, l))
+    }
 
     pub fn eq_antisymm_many(&mut self, xs: LevelsPtr<'t>, ys: LevelsPtr<'t>) -> bool {
+        if xs == ys {
+            return true;
+        }
         let xs = self.read_levels(xs).clone();
         let ys = self.read_levels(ys).clone();
         if xs.len() != ys.len() {

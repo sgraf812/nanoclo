@@ -1,14 +1,12 @@
 use crate::closure::{
-    clo_le, Clo, Entry, EnvId, SClo, SpineVec, ENV_NIL,
+    Clo, Entry, SClo, SpineVec, ENV_NIL,
 };
-use crate::env::{Declar, DeclarInfo, Env, ReducibilityHint};
+use crate::env::{Declar, DeclarInfo, Env};
 use crate::expr::Expr;
 use crate::util::{
-    nat_div, nat_gcd, nat_land, nat_lor, nat_mod, nat_sub, nat_xor,
     ExportFile, ExprPtr, LevelPtr, LevelsPtr, NamePtr, TcCtx,
 };
-use num_bigint::BigUint;
-use num_traits::{ToPrimitive, Zero};
+use num_traits::Zero;
 use std::error::Error;
 
 /// Conversion steps one speculative comparison may spend, counting everything
@@ -416,9 +414,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     #[inline]
 
-    #[inline]
+    
 
-    #[inline]
+    
 
 
     /// The value denoted by a closure: evaluation reads the checker's own
@@ -436,26 +434,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
 
 
-
-    fn lvl_eq1(&mut self, l1: LevelPtr<'t>, l2: LevelPtr<'t>) -> bool {
-        l1 == l2 || self.ctx.eq_antisymm(l1, l2)
-    }
-
-    fn lvl_eq_list(&mut self, ls: LevelsPtr<'t>, rs: LevelsPtr<'t>) -> bool {
-        if ls == rs {
-            return true;
-        }
-        let (xs, ys) = (self.ctx.read_levels(ls), self.ctx.read_levels(rs));
-        if xs.len() != ys.len() {
-            return false;
-        }
-        for (&a, &b) in xs.iter().zip(ys.iter()) {
-            if !self.lvl_eq1(a, b) {
-                return false;
-            }
-        }
-        true
-    }
 
 
 

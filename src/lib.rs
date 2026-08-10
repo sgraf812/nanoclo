@@ -22,7 +22,6 @@ pub mod tc;
 #[cfg(test)]
 mod tests;
 pub mod unique_hasher;
-pub(crate) mod union_find;
 pub mod util;
 
 pub(crate) const STACK_SIZE: usize = 1 << 30;
