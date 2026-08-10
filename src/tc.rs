@@ -1104,18 +1104,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn is_def_eq_clo(&mut self, t: Clo<'t>, s: Clo<'t>) -> bool {
         let tn = self.whnf_core_clo(t);
         let sn = self.whnf_core_clo(s);
-        if self.s_quick_eq(&tn, &sn) {
-            return true;
-        }
         self.is_def_eq_s_core(tn, sn)
     }
 
     fn is_def_eq_s(&mut self, t: SClo<'t>, s: SClo<'t>) -> bool {
         let tn = self.whnf_core_ext(t, false, false);
         let sn = self.whnf_core_ext(s, false, false);
-        if self.s_quick_eq(&tn, &sn) {
-            return true;
-        }
         self.is_def_eq_s_core(tn, sn)
     }
 
