@@ -66,10 +66,11 @@ impl<'p> ExportFile<'p> {
         })
     }
 
-    /// Check a declaration in an existing context.
+    /// Check a declaration in an existing context. The context is reset
+    /// first, so consecutive calls on one context check each declaration
+    /// from the same state a fresh context would.
     pub fn check_declar_in<'t>(&'t self, ctx: &mut TcCtx<'t, 'p>, d: &Declar<'p>) {
-        ctx.rp.reset_decl();
-        ctx.nb.reset_decl();
+        ctx.reset_decl();
         use Declar::*;
         match d {
             Axiom { .. } => ctx.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()),
@@ -112,35 +113,38 @@ impl<'p> ExportFile<'p> {
                         .ok().and_then(|v| v.parse().ok());
                     let repeat: usize = std::env::var("NANOCLO_REPEAT")
                         .ok().and_then(|v| v.parse().ok()).unwrap_or(1);
-                    for (i, declar) in self.declars.values().enumerate() {
-                        if i < skip {
-                            continue
-                        }
-                        if let Some(stop) = stop_after {
-                            if i > stop {
-                                break
+                    self.with_ctx(|ctx| {
+                        for (i, declar) in self.declars.values().enumerate() {
+                            if i < skip {
+                                continue
                             }
-                        }
-                        for _ in 1..repeat {
-                            self.check_declar(declar);
-                        }
-                        if report {
-                            if thresh == 0 {
-                                self.with_ctx(|ctx| eprintln!(
-                                    "ENTER\t{}\t{:?}", i, ctx.debug_print(declar.info().name)));
+                            if let Some(stop) = stop_after {
+                                if i > stop {
+                                    break
+                                }
                             }
-                            let t0 = std::time::Instant::now();
-                            self.check_declar(declar);
-                            let us = t0.elapsed().as_micros();
-                            if us >= thresh {
-                                self.with_ctx(|ctx| {
-                                    eprintln!("DECL\t{}\t{}\t{:?}", i, us, ctx.debug_print(declar.info().name))
-                                });
+                            for _ in 1..repeat {
+                                self.check_declar_in(ctx, declar);
                             }
-                        } else {
-                            self.check_declar(declar);
+                            if report {
+                                if thresh == 0 {
+                                    self.with_ctx(|c| eprintln!(
+                                        "ENTER\t{}\t{:?}", i, c.debug_print(declar.info().name)));
+                                }
+                                let t0 = std::time::Instant::now();
+                                self.check_declar_in(ctx, declar);
+                                let us = t0.elapsed().as_micros();
+                                if us >= thresh {
+                                    self.with_ctx(|c| {
+                                        eprintln!("DECL\t{}\t{}\t{:?}", i, us, c.debug_print(declar.info().name))
+                                    });
+                                }
+                            } else {
+                                self.check_declar_in(ctx, declar);
+                            }
+                            ctx.rp.flush_ctrs();
                         }
-                    }
+                    })
                 })
                 .unwrap()
                 .join()
@@ -161,14 +165,15 @@ impl<'p> ExportFile<'p> {
                     thread::Builder::new()
                         .name(format!("thread_{}", i))
                         .stack_size(crate::STACK_SIZE)
-                        .spawn_scoped(sco, || loop {
+                        .spawn_scoped(sco, || self.with_ctx(|ctx| loop {
                             let idx = task_num.fetch_add(1, Relaxed);
                             if let Some((_, declar)) = self.declars.get_index(idx) {
-                                self.check_declar(declar);
+                                self.check_declar_in(ctx, declar);
+                                ctx.rp.flush_ctrs();
                             } else {
                                 break
                             }
-                        })
+                        }))
                         .unwrap(),
                 )
             }

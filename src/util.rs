@@ -205,6 +205,24 @@ impl<'t> ExprCache<'t> {
             simplify_cache: new_fx_hash_map(),
         }
     }
+
+    /// Clear per-declaration state, keeping allocated capacity.
+    pub(crate) fn reset_decl(&mut self) {
+        const CAP: usize = 1 << 14;
+        fn rm<K: std::hash::Hash + Eq, V>(m: &mut FxHashMap<K, V>) {
+            if m.capacity() > CAP {
+                *m = FxHashMap::with_capacity_and_hasher(CAP / 2, Default::default());
+            } else if !m.is_empty() {
+                m.clear();
+            }
+        }
+        rm(&mut self.inst_cache);
+        rm(&mut self.abstr_cache);
+        rm(&mut self.subst_cache);
+        rm(&mut self.dsubst_cache);
+        rm(&mut self.abstr_cache_levels);
+        rm(&mut self.simplify_cache);
+    }
 }
 
 pub struct ExportFile<'p> {
@@ -300,6 +318,20 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             rp: crate::closure::CloState::new(),
             nb: crate::nbe::Vals::new(),
         }
+    }
+
+    /// Clear all per-declaration state, keeping allocated capacity: the
+    /// scratch dag, the expression caches, the closure machine and the value
+    /// arena. A context reset this way checks the next declaration exactly
+    /// as a fresh one would, without regrowing its tables.
+    pub fn reset_decl(&mut self) {
+        self.dag.clear_keeping_capacity();
+        self.expr_cache.reset_decl();
+        self.dbj_level_counter = 0;
+        self.unique_counter = 0;
+        self.eager_mode = false;
+        self.rp.reset_decl();
+        self.nb.reset_decl();
     }
 
     /// Like `ExportFile::with_tc_and_declar`, but reusing this context (and

@@ -104,9 +104,6 @@ pub(crate) struct CloState<'t> {
     /// keyed by the packed `(ae|aenv, be|benv, aoff|boff)` triple
     pub(crate) eq_mod_cache: Gen2<(u64, u64, u32), bool>,
 
-    // Caches valid across declarations (per thread): keys and stored values
-    // are closed (fvar-free, env-free) and refer only to constants visible at
-    // the time of entry, so no per-declaration state can leak through them.
     // Never populated while a temporary environment extension (nested
     // inductive checking) is active.
     /// const expr -> its level-instantiated definition value
@@ -175,20 +172,12 @@ impl<'t> CloState<'t> {
         }
     }
 
-    /// Clear per-declaration state, keeping allocated capacity. The global
-    /// caches persist; they only hold fvar-free, env-free entries.
+    /// Clear per-declaration state, keeping allocated capacity.
     pub(crate) fn reset_decl(&mut self) {
         const CAP: usize = 1 << 14;
         fn rm<K: std::hash::Hash + Eq, V>(m: &mut FxHashMap<K, V>) {
             if m.capacity() > CAP {
                 *m = FxHashMap::with_capacity_and_hasher(CAP / 2, Default::default());
-            } else if !m.is_empty() {
-                m.clear();
-            }
-        }
-        fn rs<K: std::hash::Hash + Eq>(m: &mut FxHashSet<K>) {
-            if m.capacity() > CAP {
-                *m = FxHashSet::with_capacity_and_hasher(CAP / 2, Default::default());
             } else if !m.is_empty() {
                 m.clear();
             }
@@ -203,6 +192,8 @@ impl<'t> CloState<'t> {
         rm(&mut self.umask_cache);
         rm(&mut self.proj_cache);
         self.eq_mod_cache.reset_decl();
+        rm(&mut self.g_unfold);
+        rm(&mut self.g_inst_ty);
     }
 }
 
