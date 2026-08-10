@@ -34,7 +34,7 @@ enum NatOp {
 /// it nests. Chosen so that the comparisons which settle a pair on the
 /// corpora finish inside it: raising it to 65536 costs `discarded-argument`
 /// its bound, lowering it to 1024 costs `args-before-unfold` its answer.
-const SPEC_BUDGET: u64 = 4096;
+pub(crate) const SPEC_BUDGET: u64 = 4096;
 
 
 use Expr::*;

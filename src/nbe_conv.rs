@@ -14,6 +14,7 @@
 //! congruence settle, and its failures are recorded separately and dropped
 //! with the guess.
 
+use crate::tc::SPEC_BUDGET;
 use crate::env::{Declar, ReducibilityHint};
 use crate::nbe::{ConstKind, Elim, RigidHead, SpineId, ValId, Value};
 use crate::tc::TypeChecker;
@@ -59,6 +60,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if x == y {
             return true;
         }
+        if self.ctx.nb.probe_depth > 0 {
+            if self.ctx.nb.probe_aborted {
+                return false;
+            }
+            if self.ctx.nb.probe_fuel == 0 {
+                self.ctx.nb.probe_aborted = true;
+                return false;
+            }
+            self.ctx.nb.probe_fuel -= 1;
+        }
         stacker::maybe_grow(256 * 1024, 16 * 1024 * 1024, || {
             self.nb_unify_cached::<RIGID>(depth, x, y)
         })
@@ -87,6 +98,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
         }
         let r = self.nb_unify_go::<RIGID>(depth, x, y);
+        if self.ctx.nb.probe_aborted {
+            return r;
+        }
         if r {
             self.ctx.nb.conv_pos.insert(key);
         } else if RIGID && neg_eligible {
@@ -342,11 +356,23 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Compare the arguments of two applications of one constant, recording
     /// failures apart so that they are dropped when the guess is.
     fn nb_spine_probe(&mut self, depth: u32, sx: SpineId, sy: SpineId) -> bool {
+        let outer = self.ctx.nb.probe_depth == 0;
+        if outer {
+            self.ctx.nb.probe_fuel = SPEC_BUDGET;
+            self.ctx.nb.probe_aborted = false;
+        }
         self.ctx.nb.probe_depth += 1;
         let r = self.nb_unify_spine::<true>(depth, sx, sy);
         self.ctx.nb.probe_depth -= 1;
-        if self.ctx.nb.probe_depth == 0 && !self.ctx.nb.conv_neg_probe.is_empty() {
-            self.ctx.nb.conv_neg_probe.clear();
+        if self.ctx.nb.probe_depth == 0 {
+            if !self.ctx.nb.conv_neg_probe.is_empty() {
+                self.ctx.nb.conv_neg_probe.clear();
+            }
+            // an exhausted comparison produced no answer
+            if self.ctx.nb.probe_aborted {
+                self.ctx.nb.probe_aborted = false;
+                return false;
+            }
         }
         r
     }

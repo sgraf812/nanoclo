@@ -160,6 +160,10 @@ pub(crate) struct Vals<'t> {
     /// terms are still equal, so its failures are dropped when the guess is.
     pub(crate) conv_neg_probe: FxHashSet<(ValId, ValId)>,
     pub(crate) probe_depth: u32,
+    /// Conversion steps the running speculation may still spend; one budget
+    /// covers a comparison and everything it nests.
+    pub(crate) probe_fuel: u64,
+    pub(crate) probe_aborted: bool,
 }
 
 impl<'t> Vals<'t> {
@@ -201,6 +205,8 @@ impl<'t> Vals<'t> {
             conv_neg: new_fx_hash_set(),
             conv_neg_probe: new_fx_hash_set(),
             probe_depth: 0,
+            probe_fuel: 0,
+            probe_aborted: false,
         }
     }
 
@@ -254,6 +260,8 @@ impl<'t> Vals<'t> {
         rs(&mut self.conv_neg);
         rs(&mut self.conv_neg_probe);
         self.probe_depth = 0;
+        self.probe_fuel = 0;
+        self.probe_aborted = false;
     }
 
     #[inline]
