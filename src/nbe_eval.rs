@@ -71,11 +71,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn nb_eval_go(&mut self, depth: u32, env: VEnvId, e: ExprPtr<'t>) -> ValId {
         match self.ctx.read_expr(e) {
             Var { dbj_idx, .. } => {
-                let v = self
-                    .ctx
-                    .nb
-                    .venv_lookup(env, u32::from(dbj_idx))
-                    .expect("nb_eval: loose bound variable");
+                let entry = self.lookup(env, dbj_idx);
+                let v = self.entry_val(entry);
                 self.nb_force(depth, v)
             }
             Sort { level, .. } => {
@@ -103,7 +100,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let mut cursor = e;
                 while let Let { val, body, .. } = self.ctx.read_expr(cursor) {
                     let v = self.nb_eval(depth, env, val);
-                    env = self.ctx.nb.venv_cons(env, v);
+                    env = self.push_entry(env, crate::closure::Entry::V(v));
                     cursor = body;
                 }
                 self.nb_eval(depth, env, cursor)
@@ -126,6 +123,19 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let env = if self.ctx.num_loose_bvars(e) == 0 { VENV_NIL } else { env };
                 self.ctx.nb.mk_thunk(env, e)
             }
+        }
+    }
+
+    /// The value an environment entry stands for: an evaluated entry is
+    /// itself, a delayed one becomes a thunk, an opened binder its neutral.
+    pub(crate) fn entry_val(&mut self, entry: crate::closure::Entry<'t>) -> crate::nbe::ValId {
+        match entry {
+            crate::closure::Entry::V(v) => v,
+            crate::closure::Entry::Val(e, env) => {
+                let env = if self.lbr(e) == 0 { crate::nbe::VENV_NIL } else { env };
+                self.ctx.nb.mk_thunk(env, e)
+            }
+            crate::closure::Entry::Neu(fv) => self.nb_local(fv),
         }
     }
 
@@ -184,7 +194,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub(crate) fn nb_apply(&mut self, depth: u32, f: ValId, a: ValId) -> ValId {
         match self.ctx.nb.get(f) {
             Value::Lam { env, body, .. } => {
-                let env2 = self.ctx.nb.venv_cons(env, a);
+                let env2 = self.push_entry(env, crate::closure::Entry::V(a));
                 self.nb_eval(depth, env2, body)
             }
             Value::Rigid { head, spine } => {
@@ -303,7 +313,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             Value::Lam { env, body, .. } | Value::Pi { env, body, .. } => (env, body),
             _ => panic!("nb_open: not a binder"),
         };
-        let env2 = self.ctx.nb.venv_cons(env, a);
+        let env2 = self.push_entry(env, crate::closure::Entry::V(a));
         self.nb_eval(depth, env2, body)
     }
 

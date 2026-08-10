@@ -27,6 +27,9 @@ pub(crate) enum Entry<'t> {
     Val(ExprPtr<'t>, EnvId),
     /// A neutral entry: the `Local` expression standing for the variable.
     Neu(ExprPtr<'t>),
+    /// An evaluated entry, named by its value index. Pushed by evaluation
+    /// when beta extends an environment with a value already in hand.
+    V(crate::nbe::ValId),
 }
 
 pub(crate) struct EnvNode<'t> {
@@ -69,6 +72,7 @@ fn pack_entry_key(env: EnvId, entry: Entry) -> (u64, u64) {
     match entry {
         Entry::Val(e, venv) => ((env as u64) << 32 | e.get_hash(), (venv as u64) << 1 | 1),
         Entry::Neu(e) => ((env as u64) << 32 | e.get_hash(), 0),
+        Entry::V(v) => ((env as u64) << 32 | v as u64, 2),
     }
 }
 
@@ -377,6 +381,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 Entry::Val(e, venv) => {
                     parent.max(self.max_level(e)).max(self.env_next_level(venv))
                 }
+                // An evaluated entry introduces no Local the environment has
+                // not seen: every neutral inside it entered through an
+                // enclosing environment, whose level this already covers.
+                Entry::V(_) => parent,
             }
         };
         // Myers jump: if dist(parent) == dist(parent.jump), jump to parent.jump.jump
@@ -613,6 +621,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let r = match n {
             Var { dbj_idx, .. } => match self.lookup(env, dbj_idx - offset) {
+                Entry::V(_) => unreachable!("value entry under reify"),
                 Entry::Neu(fv) => fv,
                 Entry::Val(e2, env2) => {
                     if env2 == ENV_NIL {
@@ -676,6 +685,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return match self.lookup(aenv, i - aoff) {
                     Entry::Val(e2, env2) => self.eq_mod(e2, env2, 0, be, benv, boff),
                     Entry::Neu(fv) => self.eq_mod_neu(fv, be, benv, boff),
+                    Entry::V(_) => unreachable!("value entry under eq_mod"),
                 };
             }
         }
@@ -686,6 +696,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return match self.lookup(benv, j - boff) {
                     Entry::Val(e2, env2) => self.eq_mod(ae, aenv, aoff, e2, env2, 0),
                     Entry::Neu(fv) => self.eq_mod_neu(fv, ae, aenv, aoff),
+                    Entry::V(_) => unreachable!("value entry under eq_mod"),
                 };
             }
         }
@@ -783,6 +794,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return match self.lookup(env, j - off) {
                     Entry::Val(e2, env2) => self.eq_mod_neu(fv, e2, env2, 0),
                     Entry::Neu(g) => fv == g,
+                    Entry::V(_) => unreachable!("value entry under eq_mod"),
                 };
             }
             return false;
@@ -818,6 +830,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     env = ENV_NIL;
                     break;
                 }
+                Entry::V(_) => unreachable!("value entry under chase"),
                 Entry::Val(e2, env2) => {
                     e = e2;
                     env = env2;

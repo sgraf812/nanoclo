@@ -1119,35 +1119,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.is_def_eq_s_core(tn, sn)
     }
 
-    /// The value denoted by a closure. An entry standing for an opened binder
-    /// becomes the neutral for that variable; an entry holding a term becomes
-    /// a thunk over it, so an entry that is never read is never evaluated.
+    /// The value denoted by a closure: evaluation reads the checker's own
+    /// environment, so nothing is translated.
     pub(crate) fn nb_of_clo(&mut self, c: Clo<'t>) -> crate::nbe::ValId {
-        let env = self.nb_of_env(c.env);
-        self.nb_eval(0, env, c.e)
-    }
-
-    fn nb_of_env(&mut self, env: EnvId) -> crate::nbe::VEnvId {
-        if env == ENV_NIL {
-            return crate::nbe::VENV_NIL;
-        }
-        if let Some(&v) = self.ctx.nb.clo_env_cache.get(&env) {
-            return v;
-        }
-        let node = &self.ctx.rp.envs[env as usize];
-        let (entry, parent) = (node.entry, node.parent);
-        let p = self.nb_of_env(parent);
-        let v = match entry {
-            Entry::Val(e, env2) => {
-                let ve = self.nb_of_env(env2);
-                let ve = if self.lbr(e) == 0 { crate::nbe::VENV_NIL } else { ve };
-                self.ctx.nb.mk_thunk(ve, e)
-            }
-            Entry::Neu(fv) => self.nb_local(fv),
-        };
-        let r = self.ctx.nb.venv_cons(p, v);
-        self.ctx.nb.clo_env_cache.insert(env, r);
-        r
+        self.nb_eval(0, c.env, c.e)
     }
 
     fn is_def_eq_s(&mut self, t: SClo<'t>, s: SClo<'t>) -> bool {
@@ -1372,6 +1347,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             Var { dbj_idx, .. } => match self.lookup(env, dbj_idx - offset) {
                 Entry::Neu(_) => true,
                 Entry::Val(e2, env2) => self.clo_has_fvar_go(e2, env2, 0),
+                Entry::V(_) => unreachable!("value entry under clo_has_fvar"),
             },
             App { fun, arg, .. } => {
                 self.clo_has_fvar_go(fun, env, offset)
@@ -1731,6 +1707,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     self.ctx.rp.ctrs[18] += 1;
                     self.infer_clo(Clo { e: e2, env: env2 }, flag)
                 }
+                Entry::V(_) => unreachable!("value entry under infer"),
             },
             Local { binder_type, .. } => {
                 self.ctx.rp.ctrs[20] += 1;

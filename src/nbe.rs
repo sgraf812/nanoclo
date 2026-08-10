@@ -20,11 +20,13 @@ use crate::util::{
 };
 
 pub(crate) type ValId = u32;
-pub(crate) type VEnvId = u32;
+/// Environments are the checker's interned environments; evaluation extends
+/// them through `push_entry` like everything else.
+pub(crate) type VEnvId = crate::closure::EnvId;
 pub(crate) type SpineId = u32;
 
 /// The empty environment.
-pub(crate) const VENV_NIL: VEnvId = 0;
+pub(crate) const VENV_NIL: VEnvId = crate::closure::ENV_NIL;
 /// The spine of a value applied to nothing.
 pub(crate) const SPINE_EMPTY: SpineId = 0;
 
@@ -96,15 +98,6 @@ pub(crate) enum Value<'t> {
     Thunk { env: VEnvId, expr: ExprPtr<'t>, forced: Option<ValId> },
 }
 
-pub(crate) struct VEnvNode {
-    pub(crate) v: ValId,
-    pub(crate) parent: VEnvId,
-    pub(crate) len: u32,
-    /// Myers skew-binary jump pointer, so reading index `i` takes O(log i)
-    /// steps rather than `i`.
-    pub(crate) jump: VEnvId,
-}
-
 pub(crate) struct SpineNode<'t> {
     pub(crate) elim: Elim<'t>,
     pub(crate) parent: SpineId,
@@ -115,12 +108,9 @@ pub(crate) struct SpineNode<'t> {
 /// the memos over them.
 pub(crate) struct Vals<'t> {
     pub(crate) vals: Vec<Value<'t>>,
-    pub(crate) venvs: Vec<VEnvNode>,
     pub(crate) spines: Vec<SpineNode<'t>>,
 
     // ---- interning ----
-    /// `(parent, value) -> environment`
-    venv_intern: FxHashMap<(VEnvId, ValId), VEnvId>,
     /// `(parent, elimination) -> spine`
     spine_intern: FxHashMap<(SpineId, Elim<'t>), SpineId>,
     /// `(head, spine) -> the neutral value`
@@ -161,7 +151,6 @@ pub(crate) struct Vals<'t> {
     /// `local expression -> the value denoting it`
     pub(crate) local_cache: FxHashMap<ExprPtr<'t>, ValId>,
     /// `rapier environment -> the same bindings as values`
-    pub(crate) clo_env_cache: FxHashMap<u32, VEnvId>,
 
     // ---- conversion results ----
     pub(crate) conv_pos: FxHashSet<(ValId, ValId)>,
@@ -180,7 +169,6 @@ impl<'t> Vals<'t> {
             // index 0 of each of these arenas is the empty case, so that
             // VENV_NIL and SPINE_EMPTY are valid indices needing no special
             // casing on the lookup paths.
-            venvs: vec![VEnvNode { v: 0, parent: 0, len: 0, jump: 0 }],
             spines: vec![SpineNode {
                 elim: Elim::Proj {
                     ty_name: crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0),
@@ -189,7 +177,6 @@ impl<'t> Vals<'t> {
                 parent: 0,
                 len: 0,
             }],
-            venv_intern: new_fx_hash_map(),
             spine_intern: new_fx_hash_map(),
             rigid_intern: new_fx_hash_map(),
             unfold_intern: new_fx_hash_map(),
@@ -210,7 +197,6 @@ impl<'t> Vals<'t> {
             open_cache: new_fx_hash_map(),
             type_cache: new_fx_hash_map(),
             local_cache: new_fx_hash_map(),
-            clo_env_cache: new_fx_hash_map(),
             conv_pos: new_fx_hash_set(),
             conv_neg: new_fx_hash_set(),
             conv_neg_probe: new_fx_hash_set(),
@@ -238,15 +224,12 @@ impl<'t> Vals<'t> {
         }
         if self.vals.capacity() > (1 << 20) {
             self.vals = Vec::new();
-            self.venvs = vec![VEnvNode { v: 0, parent: 0, len: 0, jump: 0 }];
             let sentinel = self.spines.remove(0);
             self.spines = vec![sentinel];
         } else {
             self.vals.clear();
-            self.venvs.truncate(1);
             self.spines.truncate(1);
         }
-        rm(&mut self.venv_intern);
         rm(&mut self.spine_intern);
         rm(&mut self.rigid_intern);
         rm(&mut self.unfold_intern);
@@ -267,7 +250,6 @@ impl<'t> Vals<'t> {
         rm(&mut self.open_cache);
         rm(&mut self.type_cache);
         rm(&mut self.local_cache);
-        rm(&mut self.clo_env_cache);
         rs(&mut self.conv_pos);
         rs(&mut self.conv_neg);
         rs(&mut self.conv_neg_probe);
@@ -285,49 +267,11 @@ impl<'t> Vals<'t> {
     }
 
     #[inline]
-    pub(crate) fn venv_len(&self, e: VEnvId) -> u32 { self.venvs[e as usize].len }
 
-    #[inline]
     pub(crate) fn spine_len(&self, s: SpineId) -> u32 { self.spines[s as usize].len }
 
     /// Extend an environment. Interned, so an environment built twice the
     /// same way is the same environment.
-    pub(crate) fn venv_cons(&mut self, parent: VEnvId, v: ValId) -> VEnvId {
-        if let Some(&e) = self.venv_intern.get(&(parent, v)) {
-            return e;
-        }
-        let p = &self.venvs[parent as usize];
-        let len = p.len + 1;
-        // Two equal jumps in a row combine into one twice as long.
-        let jump = {
-            let d1 = p.len - self.venvs[p.jump as usize].len;
-            let j = &self.venvs[p.jump as usize];
-            let d2 = j.len - self.venvs[j.jump as usize].len;
-            if d1 == d2 && d1 != 0 { j.jump } else { parent }
-        };
-        let id = u32::try_from(self.venvs.len()).expect("environment arena overflow");
-        self.venvs.push(VEnvNode { v, parent, len, jump });
-        self.venv_intern.insert((parent, v), id);
-        id
-    }
-
-    /// The value bound to a de Bruijn index, counting from the innermost.
-    pub(crate) fn venv_lookup(&self, mut e: VEnvId, idx: u32) -> Option<ValId> {
-        let start = self.venvs[e as usize].len;
-        let target = start.checked_sub(idx)?;
-        if target == 0 {
-            return None;
-        }
-        loop {
-            let node = &self.venvs[e as usize];
-            if node.len == target {
-                return Some(node.v);
-            }
-            let jump = &self.venvs[node.jump as usize];
-            e = if jump.len >= target { node.jump } else { node.parent };
-        }
-    }
-
     pub(crate) fn spine_snoc(&mut self, parent: SpineId, elim: Elim<'t>) -> SpineId {
         if let Some(&s) = self.spine_intern.get(&(parent, elim)) {
             return s;
