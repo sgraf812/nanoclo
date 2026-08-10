@@ -1,6 +1,10 @@
 # About
 
-This is an external type checker for the [Lean 4](https://lean-lang.org/) programming language and theorem prover. You can read more about what an external type checker is and why you might want to use one in [this book](https://ammkrn.github.io/type_checking_in_lean4/).
+nanoclo is an external type checker for the [Lean 4](https://lean-lang.org/) programming language and theorem prover, forked from [nanoda_lib](https://github.com/ammkrn/nanoda_lib). You can read more about what an external type checker is and why you might want to use one in [this book](https://ammkrn.github.io/type_checking_in_lean4/).
+
+Terms in flight are closures: an expression paired with an interned environment. Entering a binder extends the environment in O(1), a variable occurrence reads its entry through skew-binary jump pointers in O(log i), and substitution into a body happens only when a type crosses back out of the checker. On a spine of n binders whose variables are read far below them, checking costs O(n) where substituting into the body at each binder costs O(n²); the `beta-ladder` and `let-ladder` tests in the [Lean Kernel Arena](https://github.com/leanprover/lean-kernel-arena) measure exactly this.
+
+Conversion runs on spined closures with lazy delta unfolding. Comparing the arguments of two applications of one constant is speculative, and one budget of conversion steps covers a comparison and everything it nests; a comparison that exhausts it is abandoned for the unfolding route, so a mistaken bet costs a constant rather than an asymptotic factor.
 
 # Usage
 
@@ -18,7 +22,7 @@ The library component can be imported and used as a normal rust crate by specify
 
 # Configuration file
 
-The execution conditions of `nanoda_bin` are determined by a json configuration file, there is no old school CLI. This was a conscious design choice to accommodate modern development practices (checking in to version control, use with CI and automation) and what we envision to be the most likely use case for external type checkers (running a suite of external checkers). The UI for external checkers is somewhat TBD and is expected to evolve as the community starts to integrate these into what they're doing.
+The execution conditions of `nanoclo` are determined by a json configuration file, there is no old school CLI. This was a conscious design choice to accommodate modern development practices (checking in to version control, use with CI and automation) and what we envision to be the most likely use case for external type checkers (running a suite of external checkers). The UI for external checkers is somewhat TBD and is expected to evolve as the community starts to integrate these into what they're doing.
 
 Given that lean4export already uses json as its export format, adding a json parser as a dependency doesn't increase the overall complexity of the project.
 

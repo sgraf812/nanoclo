@@ -1,11 +1,11 @@
 
 [package]
 name = "nanoclo"
-version = "0.4.13"
+version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/ammkrn/nanoda_lib"
-description = "A type checker for the Lean 4 programming language and theorem prover"
+repository = "https://github.com/sgraf812/nanoclo"
+description = "An external type checker for Lean 4 with delayed instantiation, forked from nanoda_lib"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [profile.release]
