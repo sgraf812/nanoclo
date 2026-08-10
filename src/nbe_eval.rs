@@ -52,12 +52,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// and an unfolded constant through its `Unfold` node, so the sharing an
     /// evaluation memo would buy already lives in the values themselves.
     pub(crate) fn nb_eval(&mut self, depth: u32, env: VEnvId, e: ExprPtr<'t>) -> ValId {
-        let env = if self.ctx.num_loose_bvars(e) == 0 { VENV_NIL } else { env };
-        self.nb_eval_go(depth, env, e)
-    }
-
-    fn nb_eval_go(&mut self, depth: u32, env: VEnvId, e: ExprPtr<'t>) -> ValId {
-        match self.ctx.read_expr(e) {
+        let n = self.ctx.read_expr(e);
+        let env = if n.num_loose_bvars() == 0 { VENV_NIL } else { env };
+        match n {
             Var { dbj_idx, .. } => {
                 let entry = self.lookup(env, dbj_idx);
                 let v = self.entry_val(entry);
@@ -149,13 +146,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// form is evaluated straight away, since a thunk over it would cost more
     /// than the value.
     fn nb_delay(&mut self, depth: u32, env: VEnvId, e: ExprPtr<'t>) -> ValId {
-        match self.ctx.read_expr(e) {
+        let n = self.ctx.read_expr(e);
+        let env = if n.num_loose_bvars() == 0 { VENV_NIL } else { env };
+        match n {
             Var { .. } | Sort { .. } | NatLit { .. } | StringLit { .. } | Local { .. }
             | Const { .. } => self.nb_eval(depth, env, e),
-            _ => {
-                let env = if self.ctx.num_loose_bvars(e) == 0 { VENV_NIL } else { env };
-                self.ctx.nb.mk_thunk(env, e)
-            }
+            _ => self.ctx.nb.mk_thunk(env, e),
         }
     }
 
