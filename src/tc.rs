@@ -36,6 +36,12 @@ enum NatOp {
 /// its bound, lowering it to 1024 costs `args-before-unfold` its answer.
 const SPEC_BUDGET: u64 = 4096;
 
+/// Whether conversion runs on values rather than on closures.
+pub(crate) fn nbe_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("NANOCLO_NBE").is_ok())
+}
+
 use Expr::*;
 use InferFlag::*;
 
@@ -89,6 +95,7 @@ impl<'p> ExportFile<'p> {
     /// Check a declaration in an existing context.
     pub fn check_declar_in<'t>(&'t self, ctx: &mut TcCtx<'t, 'p>, d: &Declar<'p>) {
         ctx.rp.reset_decl();
+        ctx.nb.reset_decl();
         use Declar::*;
         match d {
             Axiom { .. } => ctx.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()),
@@ -1102,9 +1109,45 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Both sides enter `whnf_core` at a closure key, so the memo applies.
     fn is_def_eq_clo(&mut self, t: Clo<'t>, s: Clo<'t>) -> bool {
+        if nbe_on() {
+            let a = self.nb_of_clo(t);
+            let b = self.nb_of_clo(s);
+            return self.nb_conv(0, a, b);
+        }
         let tn = self.whnf_core_clo(t);
         let sn = self.whnf_core_clo(s);
         self.is_def_eq_s_core(tn, sn)
+    }
+
+    /// The value denoted by a closure. An entry standing for an opened binder
+    /// becomes the neutral for that variable; an entry holding a term becomes
+    /// a thunk over it, so an entry that is never read is never evaluated.
+    pub(crate) fn nb_of_clo(&mut self, c: Clo<'t>) -> crate::nbe::ValId {
+        let env = self.nb_of_env(c.env);
+        self.nb_eval(0, env, c.e)
+    }
+
+    fn nb_of_env(&mut self, env: EnvId) -> crate::nbe::VEnvId {
+        if env == ENV_NIL {
+            return crate::nbe::VENV_NIL;
+        }
+        if let Some(&v) = self.ctx.nb.clo_env_cache.get(&env) {
+            return v;
+        }
+        let node = &self.ctx.rp.envs[env as usize];
+        let (entry, parent) = (node.entry, node.parent);
+        let p = self.nb_of_env(parent);
+        let v = match entry {
+            Entry::Val(e, env2) => {
+                let ve = self.nb_of_env(env2);
+                let ve = if self.lbr(e) == 0 { crate::nbe::VENV_NIL } else { ve };
+                self.ctx.nb.mk_thunk(ve, e)
+            }
+            Entry::Neu(fv) => self.nb_local(fv),
+        };
+        let r = self.ctx.nb.venv_cons(p, v);
+        self.ctx.nb.clo_env_cache.insert(env, r);
+        r
     }
 
     fn is_def_eq_s(&mut self, t: SClo<'t>, s: SClo<'t>) -> bool {

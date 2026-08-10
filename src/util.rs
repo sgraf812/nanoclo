@@ -282,6 +282,7 @@ pub struct TcCtx<'t, 'p> {
     /// `closure.rs`. Lives here so that it can persist for the lifetime
     /// of the context (one context per checking thread).
     pub(crate) rp: crate::closure::CloState<'t>,
+    pub(crate) nb: crate::nbe::Vals<'t>,
 }
 
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
@@ -294,6 +295,7 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             expr_cache: ExprCache::new(),
             eager_mode: false,
             rp: crate::closure::CloState::new(),
+            nb: crate::nbe::Vals::new(),
         }
     }
 
