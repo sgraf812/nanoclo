@@ -493,6 +493,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     pub(crate) fn is_def_eq(&mut self, t: Clo<'t>, s: Clo<'t>) -> bool {
         self.ctx.rp.ctrs[3] += 1;
+        // syntactically equal modulo substitution: answered without
+        // evaluating either side
+        if self.eq_mod(t.e, t.env, 0, s.e, s.env, 0) {
+            return true;
+        }
         let a = self.nb_of_clo(t);
         let b = self.nb_of_clo(s);
         self.nb_conv(0, a, b)
@@ -702,14 +707,29 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let mut f_ty: Clo<'t> = Clo::of(self.infer_clo(s.head, flag));
         for &arg in s.spine.iter() {
-            let fv = self.nb_of_clo(f_ty);
-            let fv = self.nb_force(0, fv);
-            let fv = self.nb_whnf(0, fv);
-            let crate::nbe::Value::Pi { domain, env: pi_env, body, .. } =
-                self.ctx.nb.get(fv)
-            else {
-                panic!("function expected");
-            };
+            // A syntactic binder is peeled without evaluating its domain;
+            // anything else is forced to a Pi value. `dom_e` carries the
+            // domain as a closure over `pi_env`, `dom_v` as a value.
+            let (dom_e, dom_v, pi_env, body);
+            if let Pi { binder_type, body: b, .. } = self.ctx.read_expr(f_ty.e) {
+                dom_e = Some(binder_type);
+                dom_v = None;
+                pi_env = f_ty.env;
+                body = b;
+            } else {
+                let fv = self.nb_of_clo(f_ty);
+                let fv = self.nb_force(0, fv);
+                let fv = self.nb_whnf(0, fv);
+                let crate::nbe::Value::Pi { domain, env, body: b, .. } =
+                    self.ctx.nb.get(fv)
+                else {
+                    panic!("function expected");
+                };
+                dom_e = None;
+                dom_v = Some(domain);
+                pi_env = env;
+                body = b;
+            }
             if flag == Check {
                 let a_ty = self.infer_clo(arg, flag);
                 // `@eagerReduce A a` in argument position asks for the
@@ -719,8 +739,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 if self.ctx.is_eager_reduce_app(arg.e) {
                     self.ctx.eager_mode = true;
                 }
-                let a_ty_v = self.nb_of_clo(Clo::of(a_ty));
-                let ok = self.nb_conv(0, a_ty_v, domain);
+                let ok = if let (None, Some(bt)) = (dom_v, dom_e) {
+                    self.is_def_eq(Clo { e: bt, env: pi_env }, Clo::of(a_ty))
+                } else {
+                    let dom_v = dom_v.expect("domain");
+                    let a_ty_v = self.nb_of_clo(Clo::of(a_ty));
+                    self.nb_conv(0, a_ty_v, dom_v)
+                };
                 self.ctx.eager_mode = outer_eager;
                 assert!(ok, "application type mismatch");
             }

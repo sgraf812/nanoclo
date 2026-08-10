@@ -51,10 +51,14 @@ fn head_eq(a: RigidHead<'_>, b: RigidHead<'_>) -> bool {
 
 impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub(crate) fn nb_conv(&mut self, depth: u32, x: ValId, y: ValId) -> bool {
-        self.nb_unify::<true>(depth, x, y)
+        self.ctx.nb.in_conv += 1;
+        let r = self.nb_unify::<true>(depth, x, y);
+        self.ctx.nb.in_conv -= 1;
+        r
     }
 
     fn nb_unify<const RIGID: bool>(&mut self, depth: u32, x: ValId, y: ValId) -> bool {
+        self.ctx.rp.ctrs[11] += 1;
         let x = self.nb_force(depth, x);
         let y = self.nb_force(depth, y);
         if x == y {

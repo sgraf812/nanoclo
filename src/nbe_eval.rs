@@ -48,6 +48,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// The value of `e` under `env`.
     pub(crate) fn nb_eval(&mut self, depth: u32, env: VEnvId, e: ExprPtr<'t>) -> ValId {
+        self.ctx.rp.ctrs[1] += 1;
+        if self.ctx.nb.in_conv > 0 {
+            self.ctx.rp.ctrs[12] += 1;
+        }
         // A closed expression means the same thing under every environment,
         // so it is evaluated once and shared.
         let env = if self.ctx.num_loose_bvars(e) == 0 { VENV_NIL } else { env };
@@ -61,8 +65,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return self.nb_eval_go(depth, env, e);
         }
         if let Some(&v) = self.ctx.nb.eval_cache.get(&(e, env)) {
+            self.ctx.rp.ctrs[4] += 1;
             return v;
         }
+        self.ctx.rp.ctrs[5] += 1;
         let v = stacker::maybe_grow(256 * 1024, 16 * 1024 * 1024, || self.nb_eval_go(depth, env, e));
         self.ctx.nb.eval_cache.insert((e, env), v);
         v

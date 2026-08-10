@@ -130,6 +130,9 @@ pub(crate) struct Vals<'t> {
     // ---- memos ----
     /// `(expression, environment) -> its value`
     pub(crate) eval_cache: FxHashMap<(ExprPtr<'t>, VEnvId), ValId>,
+    /// Open expressions evaluated once already; only a second sighting earns
+    /// a cache entry, so single-use pairs cost no insert.
+    pub(crate) eval_seen: FxHashSet<ExprPtr<'t>>,
     /// `(constant, levels) -> the value of its body`
     pub(crate) unfold_cache: FxHashMap<(NamePtr<'t>, LevelsPtr<'t>), Option<ValId>>,
     /// `(constant, levels) -> the value denoting it`
@@ -164,6 +167,7 @@ pub(crate) struct Vals<'t> {
     /// covers a comparison and everything it nests.
     pub(crate) probe_fuel: u64,
     pub(crate) probe_aborted: bool,
+    pub(crate) in_conv: u32,
 }
 
 impl<'t> Vals<'t> {
@@ -191,6 +195,7 @@ impl<'t> Vals<'t> {
             str_intern: new_fx_hash_map(),
             thunk_intern: new_fx_hash_map(),
             eval_cache: new_fx_hash_map(),
+            eval_seen: new_fx_hash_set(),
             unfold_cache: new_fx_hash_map(),
             const_val_cache: new_fx_hash_map(),
             const_ty_cache: new_fx_hash_map(),
@@ -207,6 +212,7 @@ impl<'t> Vals<'t> {
             probe_depth: 0,
             probe_fuel: 0,
             probe_aborted: false,
+            in_conv: 0,
         }
     }
 
@@ -246,6 +252,7 @@ impl<'t> Vals<'t> {
         rm(&mut self.str_intern);
         rm(&mut self.thunk_intern);
         rm(&mut self.eval_cache);
+        rs(&mut self.eval_seen);
         rm(&mut self.unfold_cache);
         rm(&mut self.const_val_cache);
         rm(&mut self.const_ty_cache);

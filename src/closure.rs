@@ -685,7 +685,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return match self.lookup(aenv, i - aoff) {
                     Entry::Val(e2, env2) => self.eq_mod(e2, env2, 0, be, benv, boff),
                     Entry::Neu(fv) => self.eq_mod_neu(fv, be, benv, boff),
-                    Entry::V(_) => unreachable!("value entry under eq_mod"),
+                    Entry::V(_) => return false,
                 };
             }
         }
@@ -696,7 +696,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return match self.lookup(benv, j - boff) {
                     Entry::Val(e2, env2) => self.eq_mod(ae, aenv, aoff, e2, env2, 0),
                     Entry::Neu(fv) => self.eq_mod_neu(fv, ae, aenv, aoff),
-                    Entry::V(_) => unreachable!("value entry under eq_mod"),
+                    Entry::V(_) => return false,
                 };
             }
         }
@@ -794,7 +794,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 return match self.lookup(env, j - off) {
                     Entry::Val(e2, env2) => self.eq_mod_neu(fv, e2, env2, 0),
                     Entry::Neu(g) => fv == g,
-                    Entry::V(_) => unreachable!("value entry under eq_mod"),
+                    Entry::V(_) => return false,
                 };
             }
             return false;
@@ -830,7 +830,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     env = ENV_NIL;
                     break;
                 }
-                Entry::V(_) => unreachable!("value entry under chase"),
+                Entry::V(_) => break,
                 Entry::Val(e2, env2) => {
                     e = e2;
                     env = env2;
