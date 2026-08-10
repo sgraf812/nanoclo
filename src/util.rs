@@ -206,7 +206,10 @@ impl<'t> ExprCache<'t> {
         }
     }
 
-    /// Clear per-declaration state, keeping allocated capacity.
+    /// Clear per-declaration state, keeping allocated capacity. The
+    /// substitution and simplification caches key and store dag pointers
+    /// only, so they stay valid as long as the dag does; they reset in
+    /// `reset_dag_caches` together with it.
     pub(crate) fn reset_decl(&mut self) {
         const CAP: usize = 1 << 14;
         fn rm<K: std::hash::Hash + Eq, V>(m: &mut FxHashMap<K, V>) {
@@ -218,10 +221,14 @@ impl<'t> ExprCache<'t> {
         }
         rm(&mut self.inst_cache);
         rm(&mut self.abstr_cache);
-        rm(&mut self.subst_cache);
-        rm(&mut self.dsubst_cache);
         rm(&mut self.abstr_cache_levels);
-        rm(&mut self.simplify_cache);
+    }
+
+    /// Clear the caches whose entries point into the scratch dag.
+    pub(crate) fn reset_dag_caches(&mut self) {
+        self.subst_cache.clear();
+        self.dsubst_cache.clear();
+        self.simplify_cache.clear();
     }
 }
 
@@ -298,6 +305,10 @@ pub struct TcCtx<'t, 'p> {
     pub(crate) expr_cache: ExprCache<'t>,
     /// Set while checking an argument the term marks `eagerReduce`.
     pub(crate) eager_mode: bool,
+    /// Carry the scratch dag and the dag-pointer caches across `reset_decl`.
+    /// Only the serial driver sets this: it checks declarations in export
+    /// order, which is what makes carried entries sound.
+    pub(crate) persist_dag: bool,
     /// The delayed-instantiation core's state (interned environments,
     /// per-declaration caches, and per-thread global caches); see
     /// `closure.rs`. Lives here so that it can persist for the lifetime
@@ -315,17 +326,31 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
             unique_counter: 0u32,
             expr_cache: ExprCache::new(),
             eager_mode: false,
+            persist_dag: false,
             rp: crate::closure::CloState::new(),
             nb: crate::nbe::Vals::new(),
         }
     }
 
     /// Clear all per-declaration state, keeping allocated capacity: the
-    /// scratch dag, the expression caches, the closure machine and the value
-    /// arena. A context reset this way checks the next declaration exactly
-    /// as a fresh one would, without regrowing its tables.
+    /// expression caches, the closure machine and the value arena. A context
+    /// reset this way checks the next declaration exactly as a fresh one
+    /// would, without regrowing its tables.
+    ///
+    /// With `persist_dag` set, the scratch dag and the caches whose entries
+    /// are dag pointers (constant instantiation, level substitution, level
+    /// simplification) carry over, so a constant instantiated once serves
+    /// every later declaration that mentions it. Sound when declarations are
+    /// checked in export order: everything visible while an entry was made
+    /// precedes the declaration that made it, hence is visible to every
+    /// later one. The dag is emptied whenever it outgrows `DAG_EPOCH`.
     pub fn reset_decl(&mut self) {
-        self.dag.clear_keeping_capacity();
+        const DAG_EPOCH: usize = 1 << 22;
+        if !self.persist_dag || self.dag.exprs.len() > DAG_EPOCH {
+            self.dag.clear_keeping_capacity();
+            self.expr_cache.reset_dag_caches();
+            self.rp.reset_const_caches();
+        }
         self.expr_cache.reset_decl();
         self.dbj_level_counter = 0;
         self.unique_counter = 0;

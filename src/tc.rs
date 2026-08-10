@@ -114,6 +114,7 @@ impl<'p> ExportFile<'p> {
                     let repeat: usize = std::env::var("NANOCLO_REPEAT")
                         .ok().and_then(|v| v.parse().ok()).unwrap_or(1);
                     self.with_ctx(|ctx| {
+                        ctx.persist_dag = true;
                         for (i, declar) in self.declars.values().enumerate() {
                             if i < skip {
                                 continue

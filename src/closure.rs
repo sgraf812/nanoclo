@@ -192,8 +192,13 @@ impl<'t> CloState<'t> {
         rm(&mut self.umask_cache);
         rm(&mut self.proj_cache);
         self.eq_mod_cache.reset_decl();
-        rm(&mut self.g_unfold);
-        rm(&mut self.g_inst_ty);
+    }
+
+    /// Clear the constant-instantiation caches. Their values point into the
+    /// scratch dag, so they reset exactly when it does.
+    pub(crate) fn reset_const_caches(&mut self) {
+        self.g_unfold.clear();
+        self.g_inst_ty.clear();
     }
 }
 
