@@ -713,6 +713,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if ty_name != rec_induct {
             return None;
         }
+        // A structure whose universe an instantiation may send to zero is
+        // left alone: expanding a proof into its fields would equate proofs
+        // that proof irrelevance already equates on other grounds.
+        if self.nb_may_be_prop(depth, major_ty) {
+            return None;
+        }
         let ind = self.env.get_inductive(&ty_name)?;
         let ctor_name = *ind.all_ctor_names.first()?;
         let num_fields = usize::from(self.env.get_constructor(&ctor_name)?.num_fields);

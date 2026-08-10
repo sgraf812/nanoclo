@@ -426,6 +426,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
+    /// Whether the universe of `ty` may be zero: a universe parameter counts,
+    /// since an instantiation may send it there.
+    pub(crate) fn nb_may_be_prop(&mut self, depth: u32, ty: ValId) -> bool {
+        match self.nb_type_level(depth, ty) {
+            Some(l) => self.ctx.may_be_prop(l),
+            None => false,
+        }
+    }
+
     // ---- structures ----
 
     /// A value of a structure type is the constructor applied to its
