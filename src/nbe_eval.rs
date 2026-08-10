@@ -88,7 +88,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let mut cursor = e;
                 while let Let { val, body, .. } = self.ctx.read_expr(cursor) {
                     let v = self.nb_eval(depth, env, val);
-                    env = self.push_entry(env, crate::closure::Entry::V(v));
+                    env = self.push_entry_v(env, v);
                     cursor = body;
                 }
                 self.nb_eval(depth, env, cursor)
@@ -182,7 +182,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub(crate) fn nb_apply(&mut self, depth: u32, f: ValId, a: ValId) -> ValId {
         match self.ctx.nb.get(f) {
             Value::Lam { env, body, .. } => {
-                let env2 = self.push_entry(env, crate::closure::Entry::V(a));
+                let env2 = self.push_entry_v(env, a);
                 self.nb_eval(depth, env2, body)
             }
             Value::Rigid { head, spine } => {
@@ -301,7 +301,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             Value::Lam { env, body, .. } | Value::Pi { env, body, .. } => (env, body),
             _ => panic!("nb_open: not a binder"),
         };
-        let env2 = self.push_entry(env, crate::closure::Entry::V(a));
+        let env2 = self.push_entry_v(env, a);
         self.nb_eval(depth, env2, body)
     }
 

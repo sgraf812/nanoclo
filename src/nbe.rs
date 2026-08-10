@@ -279,14 +279,17 @@ impl<'t> Vals<'t> {
     /// Extend an environment. Interned, so an environment built twice the
     /// same way is the same environment.
     pub(crate) fn spine_snoc(&mut self, parent: SpineId, elim: Elim<'t>) -> SpineId {
-        if let Some(&s) = self.spine_intern.get(&(parent, elim)) {
-            return s;
+        let Vals { spines, spine_intern, .. } = self;
+        match spine_intern.entry((parent, elim)) {
+            std::collections::hash_map::Entry::Occupied(o) => *o.get(),
+            std::collections::hash_map::Entry::Vacant(v) => {
+                let len = spines[parent as usize].len + 1;
+                let id = u32::try_from(spines.len()).expect("spine arena overflow");
+                spines.push(SpineNode { elim, parent, len });
+                v.insert(id);
+                id
+            }
         }
-        let len = self.spines[parent as usize].len + 1;
-        let id = u32::try_from(self.spines.len()).expect("spine arena overflow");
-        self.spines.push(SpineNode { elim, parent, len });
-        self.spine_intern.insert((parent, elim), id);
-        id
     }
 
     /// The eliminations of a spine, outermost last.
@@ -338,12 +341,16 @@ impl<'t> Vals<'t> {
     // ---- interned constructors ----
 
     pub(crate) fn mk_rigid(&mut self, head: RigidHead<'t>, spine: SpineId) -> ValId {
-        if let Some(&v) = self.rigid_intern.get(&(head, spine)) {
-            return v;
+        let Vals { vals, rigid_intern, .. } = self;
+        match rigid_intern.entry((head, spine)) {
+            std::collections::hash_map::Entry::Occupied(o) => *o.get(),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                let id = u32::try_from(vals.len()).expect("value arena overflow");
+                vals.push(Value::Rigid { head, spine });
+                slot.insert(id);
+                id
+            }
         }
-        let v = self.alloc(Value::Rigid { head, spine });
-        self.rigid_intern.insert((head, spine), v);
-        v
     }
 
     /// The variable standing for a binder opened at `level`. Interned on the
@@ -359,12 +366,16 @@ impl<'t> Vals<'t> {
         levels: LevelsPtr<'t>,
         spine: SpineId,
     ) -> ValId {
-        if let Some(&v) = self.unfold_intern.get(&(name, levels, spine)) {
-            return v;
+        let Vals { vals, unfold_intern, .. } = self;
+        match unfold_intern.entry((name, levels, spine)) {
+            std::collections::hash_map::Entry::Occupied(o) => *o.get(),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                let id = u32::try_from(vals.len()).expect("value arena overflow");
+                vals.push(Value::Unfold { name, levels, spine, forced: None });
+                slot.insert(id);
+                id
+            }
         }
-        let v = self.alloc(Value::Unfold { name, levels, spine, forced: None });
-        self.unfold_intern.insert((name, levels, spine), v);
-        v
     }
 
     pub(crate) fn mk_lam(
@@ -375,19 +386,23 @@ impl<'t> Vals<'t> {
         env: VEnvId,
         body: ExprPtr<'t>,
     ) -> ValId {
-        if let Some(&v) = self.lam_intern.get(&(binder_type, env, body)) {
-            return v;
+        let Vals { vals, lam_intern, .. } = self;
+        match lam_intern.entry((binder_type, env, body)) {
+            std::collections::hash_map::Entry::Occupied(o) => *o.get(),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                let id = u32::try_from(vals.len()).expect("value arena overflow");
+                vals.push(Value::Lam {
+                    binder_name,
+                    binder_style,
+                    binder_type,
+                    domain: None,
+                    env,
+                    body,
+                });
+                slot.insert(id);
+                id
+            }
         }
-        let v = self.alloc(Value::Lam {
-            binder_name,
-            binder_style,
-            binder_type,
-            domain: None,
-            env,
-            body,
-        });
-        self.lam_intern.insert((binder_type, env, body), v);
-        v
     }
 
     pub(crate) fn mk_pi(
@@ -398,12 +413,16 @@ impl<'t> Vals<'t> {
         env: VEnvId,
         body: ExprPtr<'t>,
     ) -> ValId {
-        if let Some(&v) = self.pi_intern.get(&(domain, env, body)) {
-            return v;
+        let Vals { vals, pi_intern, .. } = self;
+        match pi_intern.entry((domain, env, body)) {
+            std::collections::hash_map::Entry::Occupied(o) => *o.get(),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                let id = u32::try_from(vals.len()).expect("value arena overflow");
+                vals.push(Value::Pi { binder_name, binder_style, domain, env, body });
+                slot.insert(id);
+                id
+            }
         }
-        let v = self.alloc(Value::Pi { binder_name, binder_style, domain, env, body });
-        self.pi_intern.insert((domain, env, body), v);
-        v
     }
 
     pub(crate) fn mk_sort(&mut self, level: LevelPtr<'t>) -> ValId {
@@ -434,12 +453,16 @@ impl<'t> Vals<'t> {
     }
 
     pub(crate) fn mk_thunk(&mut self, env: VEnvId, expr: ExprPtr<'t>) -> ValId {
-        if let Some(&v) = self.thunk_intern.get(&(env, expr)) {
-            return v;
+        let Vals { vals, thunk_intern, .. } = self;
+        match thunk_intern.entry((env, expr)) {
+            std::collections::hash_map::Entry::Occupied(o) => *o.get(),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                let id = u32::try_from(vals.len()).expect("value arena overflow");
+                vals.push(Value::Thunk { env, expr, forced: None });
+                slot.insert(id);
+                id
+            }
         }
-        let v = self.alloc(Value::Thunk { env, expr, forced: None });
-        self.thunk_intern.insert((env, expr), v);
-        v
     }
 
     /// Record what a thunk evaluated to, so it is evaluated once.

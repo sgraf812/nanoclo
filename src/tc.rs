@@ -807,7 +807,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let crate::nbe::Value::Pi { env: pi_env, body, .. } = self.ctx.nb.get(rv) else {
                 panic!("invalid projection");
             };
-            let env2 = self.push_entry(pi_env, Entry::V(st_args[pi]));
+            let env2 = self.push_entry_v(pi_env, st_args[pi]);
             r = Clo { e: body, env: env2 };
         }
         let is_prop_ty = self.may_be_prop_of(s_ty);

@@ -194,8 +194,8 @@ impl<'t> CloState<'t> {
             proj_cache: new_fx_hash_map(),
             eq_mod_cache: Gen2::new(),
             clo_fvar_cache: Gen2::new(),
-            g_unfold: FxHashMap::with_capacity_and_hasher(1 << 16, Default::default()),
-            g_inst_ty: FxHashMap::with_capacity_and_hasher(1 << 18, Default::default()),
+            g_unfold: new_fx_hash_map(),
+            g_inst_ty: new_fx_hash_map(),
             g_eq_pos: UnionFind::new(),
             g_eq_neg: FxHashSet::with_capacity_and_hasher(1 << 16, Default::default()),
             probe_fuel: 0,
@@ -351,6 +351,32 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// that names that binder cannot be confused with one already in scope.
     pub(crate) fn next_level(&mut self, e: ExprPtr<'t>, env: EnvId) -> u32 {
         self.max_level(e).max(self.env_next_level(env))
+    }
+
+    /// Extend an environment with an evaluated entry. Everything the new
+    /// node holds comes from the parent node, so a miss costs one probe.
+    pub(crate) fn push_entry_v(&mut self, env: EnvId, v: crate::nbe::ValId) -> EnvId {
+        self.ctx.rp.ctrs[10] += 1;
+        let key = pack_entry_key(env, Entry::V(v));
+        let crate::closure::CloState { envs, env_intern, .. } = &mut self.ctx.rp;
+        match env_intern.entry(key) {
+            std::collections::hash_map::Entry::Occupied(o) => *o.get(),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                let p = &envs[env as usize];
+                let len = p.len + 1;
+                let next_level = p.next_level;
+                let jump = {
+                    let d1 = p.len - envs[p.jump as usize].len;
+                    let j = &envs[p.jump as usize];
+                    let d2 = j.len - envs[j.jump as usize].len;
+                    if d1 == d2 { j.jump } else { env }
+                };
+                let id = u32::try_from(envs.len()).unwrap();
+                envs.push(EnvNode { entry: Entry::V(v), parent: env, len, next_level, jump });
+                slot.insert(id);
+                id
+            }
+        }
     }
 
     pub(crate) fn push_entry(&mut self, env: EnvId, entry: Entry<'t>) -> EnvId {
