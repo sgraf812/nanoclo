@@ -386,22 +386,31 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if self.ctx.nb.spine_len(sx) != self.ctx.nb.spine_len(sy) {
             return false;
         }
-        let xs = self.ctx.nb.spine_to_vec(sx);
-        let ys = self.ctx.nb.spine_to_vec(sy);
-        for (ex, ey) in xs.into_iter().zip(ys.into_iter()) {
-            let ok = match (ex, ey) {
-                (Elim::App(a), Elim::App(b)) => self.nb_unify::<RIGID>(depth, a, b),
-                (
-                    Elim::Proj { ty_name: nx, idx: ix },
-                    Elim::Proj { ty_name: ny, idx: iy },
-                ) => nx == ny && ix == iy,
-                _ => false,
-            };
-            if !ok {
-                return false;
-            }
+        self.nb_unify_spine_go::<RIGID>(depth, sx, sy)
+    }
+
+    /// Walk two equal-length spines innermost elimination first. Spines are
+    /// interned, so a shared prefix is the same spine and one comparison
+    /// settles all of it.
+    fn nb_unify_spine_go<const RIGID: bool>(&mut self, depth: u32, sx: SpineId, sy: SpineId) -> bool {
+        if sx == sy {
+            return true;
         }
-        true
+        let nx = &self.ctx.nb.spines[sx as usize];
+        let ny = &self.ctx.nb.spines[sy as usize];
+        let (ex, ey) = (nx.elim, ny.elim);
+        let (px, py) = (nx.parent, ny.parent);
+        if !self.nb_unify_spine_go::<RIGID>(depth, px, py) {
+            return false;
+        }
+        match (ex, ey) {
+            (Elim::App(a), Elim::App(b)) => self.nb_unify::<RIGID>(depth, a, b),
+            (
+                Elim::Proj { ty_name: tx, idx: ix },
+                Elim::Proj { ty_name: ty, idx: iy },
+            ) => tx == ty && ix == iy,
+            _ => false,
+        }
     }
 
     fn nb_hint(&self, name: NamePtr<'t>) -> ReducibilityHint {

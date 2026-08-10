@@ -128,6 +128,9 @@ pub(crate) struct Vals<'t> {
     thunk_intern: FxHashMap<(VEnvId, ExprPtr<'t>), ValId>,
 
     // ---- memos ----
+    /// `(expression, environment) -> its value`, populated only at def-eq
+    /// entry points
+    pub(crate) clo_val_cache: FxHashMap<(ExprPtr<'t>, VEnvId), ValId>,
     /// `(constant, levels) -> the value of its body`
     pub(crate) unfold_cache: FxHashMap<(NamePtr<'t>, LevelsPtr<'t>), Option<ValId>>,
     /// `(constant, levels) -> the value denoting it`
@@ -189,6 +192,7 @@ impl<'t> Vals<'t> {
             nat_intern: new_fx_hash_map(),
             str_intern: new_fx_hash_map(),
             thunk_intern: new_fx_hash_map(),
+            clo_val_cache: new_fx_hash_map(),
             unfold_cache: new_fx_hash_map(),
             const_val_cache: new_fx_hash_map(),
             const_ty_cache: new_fx_hash_map(),
@@ -244,6 +248,7 @@ impl<'t> Vals<'t> {
         rm(&mut self.nat_intern);
         rm(&mut self.str_intern);
         rm(&mut self.thunk_intern);
+        rm(&mut self.clo_val_cache);
         rm(&mut self.unfold_cache);
         rm(&mut self.const_val_cache);
         rm(&mut self.const_ty_cache);

@@ -422,9 +422,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
 
     /// The value denoted by a closure: evaluation reads the checker's own
-    /// environment, so nothing is translated.
+    /// environment, so nothing is translated. Memoized on the closure: the
+    /// same term recurs at many def-eq entries, and this is the one place a
+    /// whole skeleton would otherwise be rewalked.
     pub(crate) fn nb_of_clo(&mut self, c: Clo<'t>) -> crate::nbe::ValId {
-        self.nb_eval(0, c.env, c.e)
+        if let Some(&v) = self.ctx.nb.clo_val_cache.get(&(c.e, c.env)) {
+            return v;
+        }
+        let v = self.nb_eval(0, c.env, c.e);
+        self.ctx.nb.clo_val_cache.insert((c.e, c.env), v);
+        v
     }
 
 
