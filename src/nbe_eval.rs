@@ -414,7 +414,23 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if self.ctx.read_levels(levels).len() != self.ctx.read_levels(uparams).len() {
                 return None;
             }
-            let val = self.ctx.subst_expr_levels(val, uparams, levels);
+            // The instantiated body is shared across declarations through
+            // the same cache the closure machine reads, under its lifetime
+            // discipline: closed, environment-free, constants only.
+            let val = if self.ctx.read_levels(levels).is_empty() {
+                val
+            } else if !self.env.has_temp_ext() {
+                let key = self.ctx.mk_const(name, levels);
+                if let Some(&r) = self.ctx.rp.g_unfold.get(&key) {
+                    r
+                } else {
+                    let r = self.ctx.subst_expr_levels(val, uparams, levels);
+                    self.ctx.rp.g_unfold.insert(key, r);
+                    r
+                }
+            } else {
+                self.ctx.subst_expr_levels(val, uparams, levels)
+            };
             Some(self.nb_eval(0, VENV_NIL, val))
         })();
         self.ctx.nb.unfold_cache.insert((name, levels), r);
