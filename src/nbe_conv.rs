@@ -74,9 +74,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             self.ctx.nb.probe_fuel -= 1;
         }
-        stacker::maybe_grow(256 * 1024, 16 * 1024 * 1024, || {
-            self.nb_unify_cached::<RIGID>(depth, x, y)
-        })
+        self.nb_unify_cached::<RIGID>(depth, x, y)
     }
 
     fn nb_unify_cached<const RIGID: bool>(&mut self, depth: u32, x: ValId, y: ValId) -> bool {
