@@ -982,6 +982,61 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// The type of a value. Defined for everything a conversion question can
     /// stand on: a neutral, a literal or a sort.
+    /// The expression a value stands for, folded where the value is: an
+    /// unforced constant reads back as the constant applied, and a thunk as
+    /// its own expression under its environment. Values reaching inference
+    /// hold no conversion-local variables, so a `BVar` head cannot appear.
+    pub(crate) fn nb_readback(&mut self, v: ValId) -> ExprPtr<'t> {
+        match self.ctx.nb.get(v) {
+            Value::Thunk { env, expr, .. } => self.reify(crate::closure::Clo { e: expr, env }),
+            Value::NatLit { ptr } => self.ctx.mk_nat_lit(ptr).expect("nat literal"),
+            Value::StrLit { ptr } => self.ctx.mk_string_lit(ptr).expect("string literal"),
+            Value::Sort { level } => {
+                let level = self.ctx.simplify(level);
+                self.ctx.mk_sort(level)
+            }
+            Value::Lam { binder_name, binder_style, binder_type, env, body, .. } => {
+                let lam = self.ctx.mk_lambda(binder_name, binder_style, binder_type, body);
+                self.reify(crate::closure::Clo { e: lam, env })
+            }
+            Value::Pi { binder_name, binder_style, domain, env, body } => {
+                // the read-back domain has no loose variables, so reifying
+                // the rebuilt binder touches only the body
+                let d = self.nb_readback(domain);
+                let pi = self.ctx.mk_pi(binder_name, binder_style, d, body);
+                self.reify(crate::closure::Clo { e: pi, env })
+            }
+            Value::Unfold { name, levels, spine, .. } => {
+                let head = self.ctx.mk_const(name, levels);
+                self.nb_readback_spine(head, spine)
+            }
+            Value::Rigid { head, spine } => {
+                let head_e = match head {
+                    RigidHead::Local(e) => e,
+                    RigidHead::Const(_, name, levels) => self.ctx.mk_const(name, levels),
+                    RigidHead::BVar(..) => {
+                        unreachable!("conversion-local variable read back")
+                    }
+                };
+                self.nb_readback_spine(head_e, spine)
+            }
+        }
+    }
+
+    fn nb_readback_spine(&mut self, mut out: ExprPtr<'t>, spine: SpineId) -> ExprPtr<'t> {
+        let elims = self.ctx.nb.spine_to_vec(spine);
+        for elim in elims {
+            out = match elim {
+                Elim::App(a) => {
+                    let a = self.nb_readback(a);
+                    self.ctx.mk_app(out, a)
+                }
+                Elim::Proj { ty_name, idx } => self.ctx.mk_proj(ty_name, idx, out),
+            };
+        }
+        out
+    }
+
     pub(crate) fn nb_type(&mut self, depth: u32, v: ValId) -> ValId {
         let v = self.nb_force(depth, v);
         if let Some(&t) = self.ctx.nb.type_cache.get(&v) {

@@ -36,11 +36,6 @@ enum NatOp {
 /// its bound, lowering it to 1024 costs `args-before-unfold` its answer.
 const SPEC_BUDGET: u64 = 4096;
 
-/// Whether conversion runs on values rather than on closures.
-pub(crate) fn nbe_on() -> bool {
-    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("NANOCLO_NBE").is_ok())
-}
 
 use Expr::*;
 use InferFlag::*;
@@ -258,11 +253,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Sort { level, .. } = self.ctx.read_expr(ty) {
             return level;
         }
-        let w = self.whnf_clo(Clo::of(ty));
-        if w.spine.is_empty() {
-            if let Sort { level, .. } = self.ctx.read_expr(w.head.e) {
-                return level;
-            }
+        let v = self.nb_of_clo(Clo::of(ty));
+        let v = self.nb_force(0, v);
+        let v = self.nb_whnf(0, v);
+        if let crate::nbe::Value::Sort { level } = self.ctx.nb.get(v) {
+            return level;
         }
         panic!("ensur_sort could not produce a sort")
     }
@@ -305,8 +300,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
 
     pub fn whnf(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
-        let s = self.whnf_clo(crate::closure::Clo::of(e));
-        let out = self.sclo_to_expr(&s);
+        let v = self.nb_of_clo(crate::closure::Clo::of(e));
+        let v = self.nb_force(0, v);
+        let v = self.nb_whnf(0, v);
+        let out = self.nb_readback(v);
         // mirror upstream whnf: sort levels come out simplified
         if let Sort { level, .. } = self.ctx.read_expr(out) {
             let level = self.ctx.simplify(level);
@@ -378,12 +375,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn is_prop_of_uncached(&mut self, e: ExprPtr<'t>) -> bool {
         let sort = self.infer_clo(Clo::of(e), InferOnly);
-        let w = self.whnf_clo(Clo::of(sort));
-        w.spine.is_empty()
-            && match self.ctx.read_expr(w.head.e) {
-                Sort { level, .. } => self.ctx.is_zero(level),
-                _ => false,
-            }
+        let v = self.nb_of_clo(Clo::of(sort));
+        let v = self.nb_force(0, v);
+        let v = self.nb_whnf(0, v);
+        match self.ctx.nb.get(v) {
+            crate::nbe::Value::Sort { level } => self.ctx.is_zero(level),
+            _ => false,
+        }
     }
 
     pub fn is_prop(&mut self, e: ExprPtr<'t>) -> (bool, ExprPtr<'t>) {
@@ -1109,14 +1107,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Both sides enter `whnf_core` at a closure key, so the memo applies.
     fn is_def_eq_clo(&mut self, t: Clo<'t>, s: Clo<'t>) -> bool {
-        if nbe_on() {
-            let a = self.nb_of_clo(t);
-            let b = self.nb_of_clo(s);
-            return self.nb_conv(0, a, b);
-        }
-        let tn = self.whnf_core_clo(t);
-        let sn = self.whnf_core_clo(s);
-        self.is_def_eq_s_core(tn, sn)
+        let a = self.nb_of_clo(t);
+        let b = self.nb_of_clo(s);
+        self.nb_conv(0, a, b)
     }
 
     /// The value denoted by a closure: evaluation reads the checker's own
@@ -1707,7 +1700,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     self.ctx.rp.ctrs[18] += 1;
                     self.infer_clo(Clo { e: e2, env: env2 }, flag)
                 }
-                Entry::V(_) => unreachable!("value entry under infer"),
+                Entry::V(v) => {
+                    self.ctx.rp.ctrs[18] += 1;
+                    let ty = self.nb_type(0, v);
+                    self.nb_readback(ty)
+                }
             },
             Local { binder_type, .. } => {
                 self.ctx.rp.ctrs[20] += 1;
@@ -1894,17 +1891,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let mut f_ty: Clo<'t> = Clo::of(self.infer_clo(s.head, flag));
         for &arg in s.spine.iter() {
-            let fw = if matches!(self.ctx.read_expr(f_ty.e), Pi { .. }) {
-                SClo { head: f_ty, spine: SpineVec::new() }
-            } else {
-                self.whnf_clo(f_ty)
-            };
-            let Pi { binder_type: dom, body, .. } = self.ctx.read_expr(fw.head.e) else {
+            let fv = self.nb_of_clo(f_ty);
+            let fv = self.nb_force(0, fv);
+            let fv = self.nb_whnf(0, fv);
+            let crate::nbe::Value::Pi { domain, env: pi_env, body, .. } =
+                self.ctx.nb.get(fv)
+            else {
                 panic!("function expected");
             };
-            if !fw.spine.is_empty() {
-                panic!("function expected");
-            }
             if flag == Check {
                 let a_ty = self.infer_clo(arg, flag);
                 // `@eagerReduce A a` in argument position asks for the
@@ -1914,11 +1908,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 if self.ctx.is_eager_reduce_app(arg.e) {
                     self.ctx.eager_mode = true;
                 }
-                let ok = self.is_def_eq(Clo { e: dom, env: fw.head.env }, Clo::of(a_ty));
+                let a_ty_v = self.nb_of_clo(Clo::of(a_ty));
+                let ok = self.nb_conv(0, a_ty_v, domain);
                 self.ctx.eager_mode = outer_eager;
                 assert!(ok, "application type mismatch");
             }
-            let env2 = self.push_entry(fw.head.env, Entry::Val(arg.e, arg.env));
+            let env2 = self.push_entry(pi_env, Entry::Val(arg.e, arg.env));
             f_ty = Clo { e: body, env: env2 };
         }
         let r = self.reify(f_ty);
@@ -1933,10 +1928,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         flag: InferFlag,
     ) -> ExprPtr<'t> {
         let s_ty = self.infer_clo(strukt, flag);
-        let st_w = self.whnf_clo(Clo::of(s_ty));
-        let (i_name, i_levels) = match self.ctx.read_expr(st_w.head.e) {
-            Const { name, levels, .. } => (name, levels),
-            _ => panic!("invalid projection"),
+        let st_v = self.nb_of_clo(Clo::of(s_ty));
+        let st_v = self.nb_force(0, st_v);
+        let st_v = self.nb_whnf(0, st_v);
+        let crate::nbe::Value::Rigid { head, spine: st_spine } = self.ctx.nb.get(st_v) else {
+            panic!("invalid projection");
+        };
+        let crate::nbe::RigidHead::Const(_, i_name, i_levels) = head else {
+            panic!("invalid projection");
         };
         assert!(i_name == type_name, "invalid projection");
         let (num_params, num_indices, ctors) = match self.env.get_inductive(&i_name) {
@@ -1944,8 +1943,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             None => panic!("invalid projection"),
         };
         assert!(ctors.len() == 1, "invalid projection");
+        let st_args: Vec<crate::nbe::ValId> = self
+            .ctx
+            .nb
+            .spine_to_vec(st_spine)
+            .into_iter()
+            .map(|el| match el {
+                crate::nbe::Elim::App(a) => a,
+                _ => panic!("invalid projection"),
+            })
+            .collect();
         assert!(
-            st_w.spine.len() == (num_params + num_indices) as usize,
+            st_args.len() == (num_params + num_indices) as usize,
             "invalid projection"
         );
         let ctor_info = *self
@@ -1956,42 +1965,46 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let c_ty = self.ctx.subst_declar_info_levels(ctor_info, i_levels);
         let mut r = Clo::of(c_ty);
         for pi in 0..num_params as usize {
-            let rw = self.whnf_clo(r);
-            let Pi { body, .. } = self.ctx.read_expr(rw.head.e) else {
+            let rv = self.nb_of_clo(r);
+            let rv = self.nb_force(0, rv);
+            let rv = self.nb_whnf(0, rv);
+            let crate::nbe::Value::Pi { env: pi_env, body, .. } = self.ctx.nb.get(rv) else {
                 panic!("invalid projection");
             };
-            assert!(rw.spine.is_empty(), "invalid projection");
-            let p = st_w.spine[pi];
-            let env2 = self.push_entry(rw.head.env, Entry::Val(p.e, p.env));
+            let env2 = self.push_entry(pi_env, Entry::V(st_args[pi]));
             r = Clo { e: body, env: env2 };
         }
         let is_prop_ty = self.may_be_prop_of(s_ty);
         for fi in 0..idx {
-            let rw = self.whnf_clo(r);
-            let Pi { binder_type: dom, body, .. } = self.ctx.read_expr(rw.head.e) else {
+            let rv = self.nb_of_clo(r);
+            let rv = self.nb_force(0, rv);
+            let rv = self.nb_whnf(0, rv);
+            let crate::nbe::Value::Pi { domain, env: pi_env, body, .. } =
+                self.ctx.nb.get(rv)
+            else {
                 panic!("invalid projection");
             };
-            assert!(rw.spine.is_empty(), "invalid projection");
             if self.lbr(body) > 0 && is_prop_ty {
-                let d = self.reify(Clo { e: dom, env: rw.head.env });
+                let d = self.nb_readback(domain);
                 assert!(self.is_prop_of(d), "infer_proj prop");
             }
             let bv = self.ctx.mk_var(0);
             let proj = self.ctx.mk_proj(i_name, fi, bv);
             let senv = self.push_entry(ENV_NIL, Entry::Val(strukt.e, strukt.env));
-            let env2 = self.push_entry(rw.head.env, Entry::Val(proj, senv));
+            let env2 = self.push_entry(pi_env, Entry::Val(proj, senv));
             r = Clo { e: body, env: env2 };
         }
-        let rw = self.whnf_clo(r);
-        let Pi { binder_type: dom, .. } = self.ctx.read_expr(rw.head.e) else {
+        let rv = self.nb_of_clo(r);
+        let rv = self.nb_force(0, rv);
+        let rv = self.nb_whnf(0, rv);
+        let crate::nbe::Value::Pi { domain, .. } = self.ctx.nb.get(rv) else {
             panic!("invalid projection");
         };
-        assert!(rw.spine.is_empty(), "invalid projection");
+        let d = self.nb_readback(domain);
         if is_prop_ty {
-            let d = self.reify(Clo { e: dom, env: rw.head.env });
             assert!(self.is_prop_of(d), "infer_proj prop");
         }
-        self.reify(Clo { e: dom, env: rw.head.env })
+        d
     }
 
     fn cheap_beta_reduce(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {

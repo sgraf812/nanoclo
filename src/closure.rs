@@ -621,7 +621,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let r = match n {
             Var { dbj_idx, .. } => match self.lookup(env, dbj_idx - offset) {
-                Entry::V(_) => unreachable!("value entry under reify"),
+                Entry::V(v) => self.nb_readback(v),
                 Entry::Neu(fv) => fv,
                 Entry::Val(e2, env2) => {
                     if env2 == ENV_NIL {
