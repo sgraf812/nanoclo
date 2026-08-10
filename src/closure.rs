@@ -726,10 +726,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // there keys as (e, NIL, 0). eq_mod is symmetric, so the two sides
         // are ordered canonically and each question is stored once.
         let blbr = bn.num_loose_bvars();
-        let (ka_env, ka_off) =
-            if albr <= aoff { (ENV_NIL, 0u16) } else { (self.proj_at(ae, aenv, aoff), aoff) };
-        let (kb_env, kb_off) =
-            if blbr <= boff { (ENV_NIL, 0u16) } else { (self.proj_at(be, benv, boff), boff) };
+        let (ka_env, ka_off) = if albr <= aoff { (ENV_NIL, 0u16) } else { (aenv, aoff) };
+        let (kb_env, kb_off) = if blbr <= boff { (ENV_NIL, 0u16) } else { (benv, boff) };
         let ka = (ka_env as u64) << 32 | ae.get_hash();
         let kb = (kb_env as u64) << 32 | be.get_hash();
         let memo_key = if ka <= kb {
