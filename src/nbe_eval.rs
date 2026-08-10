@@ -71,10 +71,55 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             StringLit { ptr, .. } => self.ctx.nb.mk_str(ptr),
             Local { .. } => self.nb_local(e),
             Const { name, levels, .. } => self.nb_const(name, levels),
-            App { fun, arg, .. } => {
-                let f = self.nb_eval(depth, env, fun);
-                let a = self.nb_delay(depth, env, arg);
-                self.nb_apply(depth, f, a)
+            App { .. } => {
+                // The whole application chain at once: a lambda head consumes
+                // arguments through the environment, and the first stuck head
+                // takes every remaining argument onto its spine as one value.
+                let mut args: smallvec::SmallVec<[ExprPtr<'t>; 8]> = smallvec::SmallVec::new();
+                let mut cursor = e;
+                while let App { fun, arg, .. } = self.ctx.read_expr(cursor) {
+                    args.push(arg);
+                    cursor = fun;
+                }
+                let mut f = self.nb_eval(depth, env, cursor);
+                let mut i = args.len();
+                while i > 0 {
+                    let batchable = match self.ctx.nb.get(f) {
+                        Value::Rigid { head, .. } => !matches!(
+                            head,
+                            RigidHead::Const(ConstKind::Ctor, name, _)
+                                if self.nat_ext()
+                                    && Some(name) == self.ctx.export_file.name_cache.nat_succ
+                        ),
+                        Value::Unfold { name, .. } => {
+                            !(self.nat_ext() && self.nb_is_nat_prim(name))
+                        }
+                        _ => false,
+                    };
+                    if batchable {
+                        let (head_rigid, mut spine) = match self.ctx.nb.get(f) {
+                            Value::Rigid { head, spine } => (Ok(head), spine),
+                            Value::Unfold { name, levels, spine, .. } => {
+                                (Err((name, levels)), spine)
+                            }
+                            _ => unreachable!(),
+                        };
+                        while i > 0 {
+                            i -= 1;
+                            let a = self.nb_delay(depth, env, args[i]);
+                            spine = self.ctx.nb.spine_snoc(spine, Elim::App(a));
+                        }
+                        f = match head_rigid {
+                            Ok(head) => self.ctx.nb.mk_rigid(head, spine),
+                            Err((name, levels)) => self.ctx.nb.mk_unfold(name, levels, spine),
+                        };
+                        break;
+                    }
+                    i -= 1;
+                    let a = self.nb_delay(depth, env, args[i]);
+                    f = self.nb_apply(depth, f, a);
+                }
+                f
             }
             Lambda { binder_name, binder_style, binder_type, body, .. } => {
                 self.ctx.nb.mk_lam(binder_name, binder_style, binder_type, env, body)
