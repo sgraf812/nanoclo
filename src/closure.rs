@@ -96,6 +96,13 @@ pub(crate) struct CloState<'t> {
     pub(crate) reify_go_cache: Gen2<(ExprPtr<'t>, EnvId, u16), ExprPtr<'t>>,
     /// `e -> one past the highest de Bruijn level of an fvar occurring in it`
     pub(crate) lvl_cache: FxHashMap<ExprPtr<'t>, u32>,
+    /// `type expr -> whether it is a proposition`; proof irrelevance asks
+    /// this of the same few types once per comparison.
+    pub(crate) prop_cache: FxHashMap<ExprPtr<'t>, bool>,
+    /// `(head, env, spine length) -> whether the application is a proof`.
+    /// The sort of an application's type is a level, and a level never
+    /// mentions a term, so the arguments cannot move the answer.
+    pub(crate) proof_cache: FxHashMap<(ExprPtr<'t>, EnvId, u32), bool>,
     /// `e -> the loose bvar indices it reads`
     pub(crate) umask_cache: FxHashMap<ExprPtr<'t>, Uses>,
     /// `(read set, env) -> that environment projected onto that set`. The
@@ -177,6 +184,8 @@ impl<'t> CloState<'t> {
             eq_neg: new_fx_hash_set(),
             reify_go_cache: Gen2::new(),
             lvl_cache: new_fx_hash_map(),
+            prop_cache: new_fx_hash_map(),
+            proof_cache: new_fx_hash_map(),
             umask_cache: new_fx_hash_map(),
             proj_cache: new_fx_hash_map(),
             eq_mod_cache: Gen2::new(),
@@ -236,6 +245,8 @@ impl<'t> CloState<'t> {
         self.probe_aborted = false;
         self.reify_go_cache.reset_decl();
         rm(&mut self.lvl_cache);
+        rm(&mut self.prop_cache);
+        rm(&mut self.proof_cache);
         rm(&mut self.umask_cache);
         rm(&mut self.proj_cache);
         self.eq_mod_cache.reset_decl();

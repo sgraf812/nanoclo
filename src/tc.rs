@@ -346,7 +346,30 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Whether the type of `e` is a proposition. Answers from the reduced
     /// head, so no type crosses back to an expression to be inspected.
+    /// Whether `s` is a proof, memoized on the head and the arity: the sort
+    /// of an application's type is a level, and a level never mentions a
+    /// term, so the arguments cannot move the answer.
+    fn is_proof_s(&mut self, s: &SClo<'t>) -> bool {
+        let key = (s.head.e, s.head.env, s.spine.len() as u32);
+        if let Some(&b) = self.ctx.rp.proof_cache.get(&key) {
+            return b;
+        }
+        let ty = self.infer_s(s, InferOnly);
+        let b = self.is_prop_of(ty);
+        self.ctx.rp.proof_cache.insert(key, b);
+        b
+    }
+
     fn is_prop_of(&mut self, e: ExprPtr<'t>) -> bool {
+        if let Some(&b) = self.ctx.rp.prop_cache.get(&e) {
+            return b;
+        }
+        let b = self.is_prop_of_uncached(e);
+        self.ctx.rp.prop_cache.insert(e, b);
+        b
+    }
+
+    fn is_prop_of_uncached(&mut self, e: ExprPtr<'t>) -> bool {
         let sort = self.infer_clo(Clo::of(e), InferOnly);
         let w = self.whnf_clo(Clo::of(sort));
         w.spine.is_empty()
@@ -1132,8 +1155,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return b;
         }
         // proof irrelevance
-        let t_ty = self.infer_s(&tn, InferOnly);
-        if self.is_prop_of(t_ty) {
+        if self.is_proof_s(&tn) {
+            let t_ty = self.infer_s(&tn, InferOnly);
             let s_ty = self.infer_s(&sn, InferOnly);
             if self.is_def_eq(Clo::of(t_ty), Clo::of(s_ty)) {
                 return true;
