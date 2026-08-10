@@ -1,4 +1,5 @@
 /target
+/target-fp
 .DS_Store
 design.md
 .claude/
