@@ -87,8 +87,8 @@ pub(crate) struct CloState<'t> {
     /// keyed by `pack_entry_key(parent, entry)`
     pub(crate) env_intern: FxHashMap<(u64, u64), EnvId>,
 
-    pub(crate) infer_cache_check: FxHashMap<Clo<'t>, ExprPtr<'t>>,
-    pub(crate) infer_cache_only: FxHashMap<Clo<'t>, ExprPtr<'t>>,
+    pub(crate) infer_cache_check: FxHashMap<Clo<'t>, Clo<'t>>,
+    pub(crate) infer_cache_only: FxHashMap<Clo<'t>, Clo<'t>>,
     pub(crate) reify_go_cache: Gen2<(ExprPtr<'t>, EnvId, u16), ExprPtr<'t>>,
     /// `e -> one past the highest de Bruijn level of an fvar occurring in it`
     pub(crate) lvl_cache: FxHashMap<ExprPtr<'t>, u32>,

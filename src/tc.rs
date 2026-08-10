@@ -228,11 +228,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     /// `ensure_sort` without reifying the reduced type.
-    fn ensure_sort_clo(&mut self, ty: ExprPtr<'t>) -> LevelPtr<'t> {
-        if let Sort { level, .. } = self.ctx.read_expr(ty) {
+    fn ensure_sort_clo(&mut self, ty: Clo<'t>) -> LevelPtr<'t> {
+        if let Sort { level, .. } = self.ctx.read_expr(ty.e) {
             return level;
         }
-        let v = self.nb_of_clo(Clo::of(ty));
+        let v = self.nb_of_clo(ty);
         let v = self.nb_force(0, v);
         let v = self.nb_whnf(0, v);
         if let crate::nbe::Value::Sort { level } = self.ctx.nb.get(v) {
@@ -272,7 +272,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Delegates to the delayed-instantiation core (`closure.rs`).
     pub(crate) fn infer(&mut self, e: ExprPtr<'t>, flag: InferFlag) -> ExprPtr<'t> {
-        self.infer_clo(crate::closure::Clo::of(e), flag)
+        let c = self.infer_clo(crate::closure::Clo::of(e), flag);
+        self.reify(c)
     }
 
 
@@ -339,7 +340,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     fn is_prop_of_uncached(&mut self, e: ExprPtr<'t>) -> bool {
         let sort = self.infer_clo(Clo::of(e), InferOnly);
-        let v = self.nb_of_clo(Clo::of(sort));
+        let v = self.nb_of_clo(sort);
         let v = self.nb_force(0, v);
         let v = self.nb_whnf(0, v);
         match self.ctx.nb.get(v) {
@@ -458,9 +459,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Could `ty` be a proposition? A universe parameter stands for a level
     /// that an instantiation may send to zero, so it counts.
-    fn may_be_prop_of(&mut self, ty: ExprPtr<'t>) -> bool {
-        let sort = self.infer_clo(Clo::of(ty), InferOnly);
-        let v = self.nb_of_clo(Clo::of(sort));
+    fn may_be_prop_of(&mut self, ty: Clo<'t>) -> bool {
+        let sort = self.infer_clo(ty, InferOnly);
+        let v = self.nb_of_clo(sort);
         let v = self.nb_force(0, v);
         let v = self.nb_whnf(0, v);
         match self.ctx.nb.get(v) {
@@ -472,7 +473,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     // ---- inference ----
 
-    pub(crate) fn infer_clo(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    pub(crate) fn infer_clo(&mut self, c: Clo<'t>, flag: InferFlag) -> Clo<'t> {
         self.infer_go(c, flag)
     }
 
@@ -488,14 +489,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.nb_conv(0, a, b)
     }
 
-    fn infer_go(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    fn infer_go(&mut self, c: Clo<'t>, flag: InferFlag) -> Clo<'t> {
         self.ctx.rp.ctrs[0] += 1;
         let n = self.ctx.read_expr(c.e);
         match n {
             Var { dbj_idx, .. } => match self.lookup(c.env, dbj_idx) {
                 Entry::Neu(fv) => {
                     self.ctx.rp.ctrs[19] += 1;
-                    self.fvar_type(fv)
+                    Clo::of(self.fvar_type(fv))
                 }
                 Entry::Val(e2, env2) => {
                     self.ctx.rp.ctrs[18] += 1;
@@ -504,12 +505,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 Entry::V(v) => {
                     self.ctx.rp.ctrs[18] += 1;
                     let ty = self.nb_type(0, v);
-                    self.nb_readback(ty)
+                    Clo::of(self.nb_readback(ty))
                 }
             },
             Local { binder_type, .. } => {
                 self.ctx.rp.ctrs[20] += 1;
-                binder_type
+                Clo::of(binder_type)
             }
             Sort { level, .. } => {
                 self.ctx.rp.ctrs[21] += 1;
@@ -517,7 +518,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     self.check_level(level);
                 }
                 let l2 = self.ctx.succ(level);
-                self.ctx.mk_sort(l2)
+                Clo::of(self.ctx.mk_sort(l2))
             }
             Const { name, levels, .. } => {
                 self.ctx.rp.ctrs[22] += 1;
@@ -529,21 +530,21 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                                 self.check_level(l);
                             }
                         }
-                        return r;
+                        return Clo::of(r);
                     }
                     let r = self.infer_const(name, levels, flag);
                     self.ctx.rp.g_inst_ty.insert(c.e, r);
-                    return r;
+                    return Clo::of(r);
                 }
-                self.infer_const(name, levels, flag)
+                Clo::of(self.infer_const(name, levels, flag))
             }
             NatLit { .. } => {
                 assert!(self.ctx.export_file.config.nat_extension);
-                self.ctx.nat_type().unwrap()
+                Clo::of(self.ctx.nat_type().unwrap())
             }
             StringLit { .. } => {
                 assert!(self.ctx.export_file.config.string_extension);
-                self.ctx.string_type().unwrap()
+                Clo::of(self.ctx.string_type().unwrap())
             }
             Lambda { .. } | Pi { .. } | Let { .. } | App { .. } | Proj { .. } => {
                 let key = self.key(c);
@@ -612,7 +613,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
 
-    fn infer_lambda(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    fn infer_lambda(&mut self, c: Clo<'t>, flag: InferFlag) -> Clo<'t> {
         // The whole run of binders is opened before the body is inferred, so
         // the fvars standing for them are abstracted out of the inferred type
         // in one traversal rather than one traversal per binder.
@@ -638,6 +639,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             e = body;
         }
         let bt = self.infer_clo(Clo { e, env }, flag);
+        // The abstraction step needs the inferred type as an expression over
+        // the fvars just opened; this is one of the places reification stays.
+        let bt = self.reify(bt);
         let bt = self.cheap_beta_reduce(bt);
         let n = u32::try_from(binders.len()).unwrap();
         let mut r = self.ctx.abstr_levels_at(bt, start, start + n);
@@ -646,10 +650,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let d = self.ctx.abstr_levels_at(d, start, start + i);
             r = self.ctx.mk_pi(binder_name, binder_style, d, r);
         }
-        r
+        Clo::of(r)
     }
 
-    fn infer_pi(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    fn infer_pi(&mut self, c: Clo<'t>, flag: InferFlag) -> Clo<'t> {
         let Pi { binder_type, body, .. } = self.ctx.read_expr(c.e) else {
             unreachable!()
         };
@@ -664,11 +668,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // mkLevelIMax': imax with immediate simplifications
         let lvl = self.ctx.imax(u, s);
         let lvl = self.ctx.simplify(lvl);
-        self.ctx.mk_sort(lvl)
+        Clo::of(self.ctx.mk_sort(lvl))
     }
 
 
-    fn infer_let(&mut self, c: Clo<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    fn infer_let(&mut self, c: Clo<'t>, flag: InferFlag) -> Clo<'t> {
         let Let { binder_type, val, body, .. } = self.ctx.read_expr(c.e) else {
             unreachable!()
         };
@@ -677,8 +681,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let tty = self.infer_clo(Clo::of(t), flag);
             self.ensure_sort_clo(tty);
             let vty = self.infer_clo(Clo { e: val, env: c.env }, flag);
+            let vty = Clo::of(self.reify(vty));
             assert!(
-                self.is_def_eq(Clo::of(vty), Clo::of(t)),
+                self.is_def_eq(vty, Clo::of(t)),
                 "let type mismatch"
             );
         }
@@ -686,11 +691,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.infer_clo(Clo { e: body, env: env2 }, flag)
     }
 
-    pub(crate) fn infer_s(&mut self, s: &SClo<'t>, flag: InferFlag) -> ExprPtr<'t> {
+    pub(crate) fn infer_s(&mut self, s: &SClo<'t>, flag: InferFlag) -> Clo<'t> {
         if s.spine.is_empty() {
             return self.infer_clo(s.head, flag);
         }
-        let mut f_ty: Clo<'t> = Clo::of(self.infer_clo(s.head, flag));
+        let mut f_ty: Clo<'t> = self.infer_clo(s.head, flag);
         for &arg in s.spine.iter() {
             // A syntactic binder is peeled without evaluating its domain;
             // anything else is forced to a Pi value. `dom_e` carries the
@@ -725,10 +730,22 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     self.ctx.eager_mode = true;
                 }
                 let ok = if let (None, Some(bt)) = (dom_v, dom_e) {
-                    self.is_def_eq(Clo { e: bt, env: pi_env }, Clo::of(a_ty))
+                    self.ctx.rp.ctrs[3] += 1;
+                    // The syntactic front runs on the argument type as a
+                    // closure; when it fails, the comparison falls to
+                    // values, and the reified argument type keys the value
+                    // memo the same way at every site that infers it.
+                    if self.eq_mod(bt, pi_env, 0, a_ty.e, a_ty.env, 0) {
+                        true
+                    } else {
+                        let a_ty = Clo::of(self.reify(a_ty));
+                        let a = self.nb_of_clo(Clo { e: bt, env: pi_env });
+                        let b = self.nb_of_clo(a_ty);
+                        self.nb_conv(0, a, b)
+                    }
                 } else {
                     let dom_v = dom_v.expect("domain");
-                    let a_ty_v = self.nb_of_clo(Clo::of(a_ty));
+                    let a_ty_v = self.nb_of_clo(a_ty);
                     self.nb_conv(0, a_ty_v, dom_v)
                 };
                 self.ctx.eager_mode = outer_eager;
@@ -737,8 +754,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let env2 = self.push_entry(pi_env, Entry::Val(arg.e, arg.env));
             f_ty = Clo { e: body, env: env2 };
         }
-        let r = self.reify(f_ty);
-        r
+        f_ty
     }
 
     fn infer_proj(
@@ -747,9 +763,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         idx: usize,
         strukt: Clo<'t>,
         flag: InferFlag,
-    ) -> ExprPtr<'t> {
+    ) -> Clo<'t> {
         let s_ty = self.infer_clo(strukt, flag);
-        let st_v = self.nb_of_clo(Clo::of(s_ty));
+        let st_v = self.nb_of_clo(s_ty);
         let st_v = self.nb_force(0, st_v);
         let st_v = self.nb_whnf(0, st_v);
         let crate::nbe::Value::Rigid { head, spine: st_spine } = self.ctx.nb.get(st_v) else {
@@ -825,7 +841,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if is_prop_ty {
             assert!(self.is_prop_of(d), "infer_proj prop");
         }
-        d
+        Clo::of(d)
     }
 
     fn cheap_beta_reduce(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
