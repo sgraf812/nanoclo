@@ -154,12 +154,6 @@ pub fn ctrs_report() -> String {
     out
 }
 
-    /// Ceiling on a single memo table within one declaration. The tables are
-/// cleared between declarations, but a large declaration can grow one
-/// without bound; peak memory is set by the largest declaration in the
-/// export. Dropping a memo costs recomputation, never correctness.
-
-
 impl<'t> CloState<'t> {
     pub(crate) fn new() -> Self {
         CloState {
