@@ -121,6 +121,13 @@ pub(crate) struct CloState<'t> {
     pub(crate) proj_cache: FxHashMap<(u64, EnvId), EnvId>,
     /// `proj_cache` for wide read sets, keyed by the interned set id
     pub(crate) proj_cache_w: FxHashMap<(u32, EnvId), EnvId>,
+    /// `(read set, env) -> the view of that environment`, the memo the
+    /// projection already has. A view is a function of the set and the
+    /// environment, and one set is asked of one environment by every term
+    /// that reads those positions, so the walk that builds it runs once.
+    /// Two generations bound what one declaration can accumulate.
+    pub(crate) view_cache: Gen2<(u64, EnvId), EnvId>,
+    pub(crate) view_cache_w: Gen2<(u32, EnvId), EnvId>,
     /// the word vectors `Uses::Wide` ids name, interned per declaration
     pub(crate) wide_uses: Vec<Box<[u64]>>,
     pub(crate) wide_intern: FxHashMap<Box<[u64]>, u32>,
@@ -178,6 +185,8 @@ impl<'t> CloState<'t> {
             umask_cache: new_fx_hash_map(),
             proj_cache: new_fx_hash_map(),
             proj_cache_w: new_fx_hash_map(),
+            view_cache: Gen2::new(),
+            view_cache_w: Gen2::new(),
             wide_uses: Vec::new(),
             wide_intern: new_fx_hash_map(),
             view_slices: Vec::new(),
@@ -217,6 +226,8 @@ impl<'t> CloState<'t> {
         rm(&mut self.prop_cache);
         rm(&mut self.proj_cache);
         rm(&mut self.proj_cache_w);
+        self.view_cache.reset_decl();
+        self.view_cache_w.reset_decl();
         self.view_slices.clear();
         self.view_table.clear();
         self.eq_mod_cache.reset_decl();
@@ -622,6 +633,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// The interned view of the entries a one-word set names, walking the
     /// chain once, or nothing when the chain is shorter than the set.
     fn view_of_mask(&mut self, m: u64, env: EnvId) -> Option<EnvId> {
+        if let Some(v) = self.ctx.rp.view_cache.get(&(m, env)) {
+            return Some(v);
+        }
         let mut picked: smallvec::SmallVec<[(u64, u64); 8]> = smallvec::SmallVec::new();
         let mut cur = env;
         let mut rest = m;
@@ -636,10 +650,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             cur = node.parent;
             rest >>= 1;
         }
-        Some(self.intern_view(&picked))
+        let v = self.intern_view(&picked);
+        self.ctx.rp.view_cache.insert((m, env), v);
+        Some(v)
     }
 
     fn view_of_wide(&mut self, id: u32, env: EnvId) -> Option<EnvId> {
+        if let Some(v) = self.ctx.rp.view_cache_w.get(&(id, env)) {
+            return Some(v);
+        }
         let words = &self.ctx.rp.wide_uses[id as usize];
         let top = words.len() * 64 - 1 - words.last().unwrap().leading_zeros() as usize;
         let mut picked: smallvec::SmallVec<[(u64, u64); 8]> = smallvec::SmallVec::new();
@@ -654,7 +673,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             cur = node.parent;
         }
-        Some(self.intern_view(&picked))
+        let v = self.intern_view(&picked);
+        self.ctx.rp.view_cache_w.insert((id, env), v);
+        Some(v)
     }
 
     fn intern_view(&mut self, picked: &[(u64, u64)]) -> EnvId {
