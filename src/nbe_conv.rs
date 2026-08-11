@@ -70,6 +70,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             if self.ctx.nb.probe_fuel == 0 {
                 self.ctx.nb.probe_aborted = true;
+                self.ctx.rp.ctrs[23] += 1;
                 return false;
             }
             self.ctx.nb.probe_fuel -= 1;
@@ -373,6 +374,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             // an exhausted comparison produced no answer
             if self.ctx.nb.probe_aborted {
                 self.ctx.nb.probe_aborted = false;
+                self.ctx.rp.ctrs[24] += 1;
                 return false;
             }
         }
