@@ -489,11 +489,6 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     pub(crate) fn is_def_eq(&mut self, t: Clo<'t>, s: Clo<'t>) -> bool {
         self.ctx.rp.ctrs[3] += 1;
-        // syntactically equal modulo substitution: answered without
-        // evaluating either side
-        if self.eq_mod(t.e, t.env, 0, s.e, s.env, 0) {
-            return true;
-        }
         let a = self.nb_of_clo(t);
         let b = self.nb_of_clo(s);
         self.nb_conv(0, a, b)
