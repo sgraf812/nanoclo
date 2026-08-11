@@ -92,9 +92,12 @@ pub(crate) enum Uses {
 }
 
 /// Words a wide read set may span; a set reaching further becomes `Deep`.
-/// A set costs one vector operation per word at every node above it, and
-/// binder chains reach depths in the thousands, so the bound keeps the cost
-/// of one node at a few words.
+/// The bound is on what the set is worth, not on what it costs to hold: a
+/// set of n positions buys a key that separates environments agreeing on
+/// those positions, and pays one environment rebuilt from n entries at
+/// every node that asks for it. On a chain of n binders each reading its
+/// predecessors, exactness at every node is quadratic and the whole
+/// environment is the cheaper key.
 const MAX_USES_WORDS: usize = 8;
 
 pub(crate) struct CloState<'t> {
