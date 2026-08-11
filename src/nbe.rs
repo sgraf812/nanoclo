@@ -480,9 +480,18 @@ impl<'t> Vals<'t> {
         v
     }
 
-    pub(crate) fn mk_thunk(&mut self, env: VEnvId, expr: ExprPtr<'t>) -> ValId {
+    /// A thunk interned under `key_env`, the environment projected onto the
+    /// entries `expr` reads, and forced under `env`, the environment whose
+    /// indices `expr`'s variables name. Two closures agreeing on the read
+    /// entries share the thunk, and with it the forced cell.
+    pub(crate) fn mk_thunk_keyed(
+        &mut self,
+        key_env: VEnvId,
+        env: VEnvId,
+        expr: ExprPtr<'t>,
+    ) -> ValId {
         let Vals { vals, thunk_intern, .. } = self;
-        match thunk_intern.entry((env, expr)) {
+        match thunk_intern.entry((key_env, expr)) {
             std::collections::hash_map::Entry::Occupied(o) => *o.get(),
             std::collections::hash_map::Entry::Vacant(slot) => {
                 let id = u32::try_from(vals.len()).expect("value arena overflow");

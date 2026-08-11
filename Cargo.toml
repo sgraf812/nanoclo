@@ -28,6 +28,7 @@ stacker = "0.1"
 mimalloc = { version = "0.1", default-features = false }
 indexmap = "2.13.0"
 rustc-hash = "1.1.0"
+hashbrown = "0.16"
 num-bigint = { version = "0.4.4", features = ["serde"] }
 num-integer = "0.1.46"
 num-traits = "0.2.17"

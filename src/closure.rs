@@ -19,6 +19,10 @@ use Expr::*;
 
 pub(crate) type EnvId = u32;
 pub(crate) const ENV_NIL: EnvId = 0;
+/// Tags an environment-id-shaped cache key as naming an interned read view.
+/// Environment ids and view ids both stay below it, so a key names exactly
+/// one of the two.
+pub(crate) const VIEW_BIT: EnvId = 1 << 31;
 
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -112,11 +116,15 @@ pub(crate) struct CloState<'t> {
     /// projection depends on the set and not on the expression that induced
     /// it, so expressions reading the same positions share one projection.
     pub(crate) proj_cache: FxHashMap<(u64, EnvId), EnvId>,
+    /// `proj_cache` for wide read sets, keyed by the interned set id
+    pub(crate) proj_cache_w: FxHashMap<(u32, EnvId), EnvId>,
     /// the word vectors `Uses::Wide` ids name, interned per declaration
     pub(crate) wide_uses: Vec<Box<[u64]>>,
     pub(crate) wide_intern: FxHashMap<Box<[u64]>, u32>,
-    /// `proj_cache` for wide read sets, keyed by the interned set id
-    pub(crate) proj_cache_w: FxHashMap<(u32, EnvId), EnvId>,
+    /// Read views: entry lists interned whole, one probe per list. A view id
+    /// carries `VIEW_BIT` when it stands in an environment-id position.
+    pub(crate) view_slices: Vec<Box<[(u64, u64)]>>,
+    pub(crate) view_table: hashbrown::HashTable<u32>,
     /// keyed by the packed `(ae|aenv, be|benv, aoff|boff)` triple
     pub(crate) eq_mod_cache: Gen2<(u64, u64, u32), bool>,
 
@@ -166,9 +174,11 @@ impl<'t> CloState<'t> {
             prop_cache: new_fx_hash_map(),
             umask_cache: new_fx_hash_map(),
             proj_cache: new_fx_hash_map(),
+            proj_cache_w: new_fx_hash_map(),
             wide_uses: Vec::new(),
             wide_intern: new_fx_hash_map(),
-            proj_cache_w: new_fx_hash_map(),
+            view_slices: Vec::new(),
+            view_table: hashbrown::HashTable::new(),
             eq_mod_cache: Gen2::new(),
             g_unfold: new_fx_hash_map(),
             g_inst_ty: new_fx_hash_map(),
@@ -204,9 +214,11 @@ impl<'t> CloState<'t> {
         rm(&mut self.prop_cache);
         rm(&mut self.umask_cache);
         rm(&mut self.proj_cache);
+        rm(&mut self.proj_cache_w);
         self.wide_uses.clear();
         rm(&mut self.wide_intern);
-        rm(&mut self.proj_cache_w);
+        self.view_slices.clear();
+        self.view_table.clear();
         self.eq_mod_cache.reset_decl();
     }
 
@@ -332,6 +344,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     if d1 == d2 { j.jump } else { env }
                 };
                 let id = u32::try_from(envs.len()).unwrap();
+                debug_assert!(id < VIEW_BIT);
                 envs.push(EnvNode { entry: Entry::V(v), parent: env, len, next_level, jump });
                 slot.insert(id);
                 id
@@ -382,6 +395,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if d1 == d2 { j.jump } else { env }
         };
         let id = u32::try_from(self.ctx.rp.envs.len()).unwrap();
+        debug_assert!(id < VIEW_BIT);
         self.ctx.rp.envs.push(EnvNode { entry, parent: env, len, next_level, jump });
         self.ctx.rp.env_intern.insert(key, id);
         id
@@ -582,6 +596,87 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             Local { binder_type, .. } => binder_type,
             _ => unreachable!("fvar_type on non-Local"),
         }
+    }
+
+    /// The environment-id-shaped key naming the entries `e` reads from
+    /// `env`: `ENV_NIL` for a closed term, the environment itself when the
+    /// term reads all of it or the set is past the wide bound, and otherwise
+    /// an interned view of the read entries, tagged with `VIEW_BIT`. Two
+    /// environments agreeing on the read entries produce the same key.
+    pub(crate) fn read_key(&mut self, e: ExprPtr<'t>, env: EnvId) -> EnvId {
+        if env == ENV_NIL {
+            return ENV_NIL;
+        }
+        match self.uses_mask(e) {
+            Uses::Mask(0) => ENV_NIL,
+            Uses::Dense | Uses::Deep => env,
+            Uses::Mask(m) => self.view_of_mask(m, env).unwrap_or(env),
+            Uses::Wide(id) => self.view_of_wide(id, env).unwrap_or(env),
+        }
+    }
+
+    /// The interned view of the entries a one-word set names, walking the
+    /// chain once, or nothing when the chain is shorter than the set.
+    fn view_of_mask(&mut self, m: u64, env: EnvId) -> Option<EnvId> {
+        let mut picked: smallvec::SmallVec<[(u64, u64); 8]> = smallvec::SmallVec::new();
+        let mut cur = env;
+        let mut rest = m;
+        while rest != 0 {
+            if cur == ENV_NIL {
+                return None;
+            }
+            let node = &self.ctx.rp.envs[cur as usize];
+            if rest & 1 != 0 {
+                picked.push(pack_entry_key(0, node.entry));
+            }
+            cur = node.parent;
+            rest >>= 1;
+        }
+        Some(self.intern_view(&picked))
+    }
+
+    fn view_of_wide(&mut self, id: u32, env: EnvId) -> Option<EnvId> {
+        let words = &self.ctx.rp.wide_uses[id as usize];
+        let top = words.len() * 64 - 1 - words.last().unwrap().leading_zeros() as usize;
+        let mut picked: smallvec::SmallVec<[(u64, u64); 8]> = smallvec::SmallVec::new();
+        let mut cur = env;
+        for d in 0..=top {
+            if cur == ENV_NIL {
+                return None;
+            }
+            let node = &self.ctx.rp.envs[cur as usize];
+            if self.ctx.rp.wide_uses[id as usize][d / 64] & (1u64 << (d % 64)) != 0 {
+                picked.push(pack_entry_key(0, node.entry));
+            }
+            cur = node.parent;
+        }
+        Some(self.intern_view(&picked))
+    }
+
+    fn intern_view(&mut self, picked: &[(u64, u64)]) -> EnvId {
+        use std::hash::{Hash, Hasher};
+        fn hash_slice(s: &[(u64, u64)]) -> u64 {
+            let mut h = rustc_hash::FxHasher::default();
+            s.hash(&mut h);
+            h.finish()
+        }
+        let hash = hash_slice(picked);
+        let CloState { view_slices, view_table, .. } = &mut self.ctx.rp;
+        let id = match view_table.entry(
+            hash,
+            |&i| view_slices[i as usize].as_ref() == picked,
+            |&i| hash_slice(view_slices[i as usize].as_ref()),
+        ) {
+            hashbrown::hash_table::Entry::Occupied(o) => *o.get(),
+            hashbrown::hash_table::Entry::Vacant(v) => {
+                let id = u32::try_from(view_slices.len()).unwrap();
+                view_slices.push(picked.to_vec().into_boxed_slice());
+                v.insert(id);
+                id
+            }
+        };
+        debug_assert!(id < VIEW_BIT);
+        VIEW_BIT | id
     }
 
     /// The identity of a closure as a question: the expression together with

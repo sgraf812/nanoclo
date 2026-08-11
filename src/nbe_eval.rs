@@ -151,8 +151,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         match n {
             Var { .. } | Sort { .. } | NatLit { .. } | StringLit { .. } | Local { .. }
             | Const { .. } => self.nb_eval(depth, env, e),
-            _ => self.ctx.nb.mk_thunk(env, e),
+            _ => self.nb_thunk(env, e),
         }
+    }
+
+    /// A thunk for `e` under `env`, shared across environments agreeing on
+    /// the entries `e` reads.
+    pub(crate) fn nb_thunk(&mut self, env: crate::nbe::VEnvId, e: ExprPtr<'t>) -> crate::nbe::ValId {
+        let key_env = self.read_key(e, env);
+        self.ctx.nb.mk_thunk_keyed(key_env, env, e)
     }
 
     /// The value an environment entry stands for: an evaluated entry is
@@ -162,7 +169,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             crate::closure::Entry::V(v) => v,
             crate::closure::Entry::Val(e, env) => {
                 let env = if self.lbr(e) == 0 { crate::nbe::VENV_NIL } else { env };
-                self.ctx.nb.mk_thunk(env, e)
+                self.nb_thunk(env, e)
             }
             crate::closure::Entry::Neu(fv) => self.nb_local(fv),
         }
