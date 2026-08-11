@@ -212,21 +212,22 @@ impl<'t> CloState<'t> {
         self.reify_go_cache.reset_decl();
         rm(&mut self.lvl_cache);
         rm(&mut self.prop_cache);
-        rm(&mut self.umask_cache);
         rm(&mut self.proj_cache);
         rm(&mut self.proj_cache_w);
-        self.wide_uses.clear();
-        rm(&mut self.wide_intern);
         self.view_slices.clear();
         self.view_table.clear();
         self.eq_mod_cache.reset_decl();
     }
 
-    /// Clear the constant-instantiation caches. Their values point into the
-    /// scratch dag, so they reset exactly when it does.
+    /// Clear the caches whose keys or values point into the scratch dag:
+    /// the constant instantiations, and the read sets, which depend on the
+    /// expression alone and so stay valid for as long as it does.
     pub(crate) fn reset_const_caches(&mut self) {
         self.g_unfold.clear();
         self.g_inst_ty.clear();
+        self.umask_cache.clear();
+        self.wide_uses.clear();
+        self.wide_intern.clear();
     }
 }
 
