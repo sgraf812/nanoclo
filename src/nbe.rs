@@ -112,7 +112,9 @@ pub(crate) struct Vals<'t> {
 
     // ---- interning ----
     /// `(parent, elimination) -> spine`
-    spine_intern: FxHashMap<(SpineId, Elim<'t>), SpineId>,
+    /// applications keyed `(parent, value)`
+    spine_intern_app: FxHashMap<(SpineId, ValId), SpineId>,
+    spine_intern_proj: FxHashMap<(SpineId, NamePtr<'t>, usize), SpineId>,
     /// `(head, spine) -> the neutral value`
     rigid_intern: FxHashMap<(RigidHead<'t>, SpineId), ValId>,
     /// `(constant, levels, spine) -> the folded application`
@@ -183,7 +185,8 @@ impl<'t> Vals<'t> {
                 parent: 0,
                 len: 0,
             }],
-            spine_intern: new_fx_hash_map(),
+            spine_intern_app: new_fx_hash_map(),
+            spine_intern_proj: new_fx_hash_map(),
             rigid_intern: new_fx_hash_map(),
             unfold_intern: new_fx_hash_map(),
             lam_intern: new_fx_hash_map(),
@@ -239,7 +242,8 @@ impl<'t> Vals<'t> {
             self.vals.clear();
             self.spines.truncate(1);
         }
-        rm(&mut self.spine_intern);
+        rm(&mut self.spine_intern_app);
+        rm(&mut self.spine_intern_proj);
         rm(&mut self.rigid_intern);
         rm(&mut self.unfold_intern);
         rm(&mut self.lam_intern);
@@ -284,15 +288,34 @@ impl<'t> Vals<'t> {
     /// Extend an environment. Interned, so an environment built twice the
     /// same way is the same environment.
     pub(crate) fn spine_snoc(&mut self, parent: SpineId, elim: Elim<'t>) -> SpineId {
-        let Vals { spines, spine_intern, .. } = self;
-        match spine_intern.entry((parent, elim)) {
-            std::collections::hash_map::Entry::Occupied(o) => *o.get(),
-            std::collections::hash_map::Entry::Vacant(v) => {
-                let len = spines[parent as usize].len + 1;
-                let id = u32::try_from(spines.len()).expect("spine arena overflow");
-                spines.push(SpineNode { elim, parent, len });
-                v.insert(id);
-                id
+        match elim {
+            Elim::App(a) => {
+                let Vals { spines, spine_intern_app, .. } = self;
+                match spine_intern_app.entry((parent, a)) {
+                    std::collections::hash_map::Entry::Occupied(o) => *o.get(),
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        let len = spines[parent as usize].len + 1;
+                        let id =
+                            u32::try_from(spines.len()).expect("spine arena overflow");
+                        spines.push(SpineNode { elim, parent, len });
+                        v.insert(id);
+                        id
+                    }
+                }
+            }
+            Elim::Proj { ty_name, idx } => {
+                let Vals { spines, spine_intern_proj, .. } = self;
+                match spine_intern_proj.entry((parent, ty_name, idx)) {
+                    std::collections::hash_map::Entry::Occupied(o) => *o.get(),
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        let len = spines[parent as usize].len + 1;
+                        let id =
+                            u32::try_from(spines.len()).expect("spine arena overflow");
+                        spines.push(SpineNode { elim, parent, len });
+                        v.insert(id);
+                        id
+                    }
+                }
             }
         }
     }
