@@ -1,7 +1,6 @@
 //! Implementation of Lean expressions
 use crate::util::{BigUintPtr, ExprPtr, FxHashMap, LevelPtr, LevelsPtr, NamePtr, StringPtr, TcCtx};
 use num_bigint::BigUint;
-use num_traits::identities::Zero;
 use Expr::*;
 use serde::Deserialize;
 
@@ -506,33 +505,25 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         }
     }
     
-    pub(crate) fn is_nat_zero(&mut self, e: ExprPtr<'t>) -> bool {
-        match self.read_expr(e) {
-            Const { .. } => self.c_nat_zero() == Some(e),
-            NatLit { ptr, .. } => self.read_bignum(ptr).map(|n| n.is_zero()).unwrap_or(false),
-            _ => false,
-        }
-    }
 
 
-    /// Used in iota reduction (`reduce_rec`) to turn a bignum
-    /// either `Nat.zero`, or `App (Nat.succ) (bignum - 1)`; in order to do iota reduction,
-    /// we need to know what constructor the major premise comes from.
-    pub(crate) fn nat_lit_to_constructor(&mut self, n: BigUintPtr<'t>) -> Option<ExprPtr<'t>> {
-        assert!(self.export_file.config.nat_extension);
-        let n = self.read_bignum(n).unwrap();
-        if n.is_zero() {
-            self.c_nat_zero()
-        } else {
-            let pred = self.alloc_bignum(core::ops::Sub::sub(n, 1u8)).unwrap();
-            let pred = self.mk_nat_lit(pred).unwrap();
-            let succ_c = self.c_nat_succ()?;
-            Some(self.mk_app(succ_c, pred))
-        }
-    }
     
 
     /// Convert a string literal to `String.ofList <| List.cons (Char.ofNat _) .. List.nil`
+    /// `Nat.zero` as a constant, for building numerals in tests.
+    #[cfg(test)]
+    pub(crate) fn c_nat_zero(&mut self) -> Option<ExprPtr<'t>> {
+        let levels = self.alloc_levels_slice(&[]);
+        Some(self.mk_const(self.export_file.name_cache.nat_zero?, levels))
+    }
+
+    /// `Nat.succ` as a constant, for building numerals in tests.
+    #[cfg(test)]
+    pub(crate) fn c_nat_succ(&mut self) -> Option<ExprPtr<'t>> {
+        let levels = self.alloc_levels_slice(&[]);
+        Some(self.mk_const(self.export_file.name_cache.nat_succ?, levels))
+    }
+
     pub(crate) fn str_lit_to_constructor(&mut self, s: StringPtr<'t>) -> Option<ExprPtr<'t>> {
         if (!self.export_file.config.string_extension) || (!self.export_file.config.nat_extension) {
             return None
@@ -571,14 +562,6 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
 
 
 
-    /// Return the expression representing either `true` or `false`
-    pub(crate) fn bool_to_expr(&mut self, b: bool) -> Option<ExprPtr<'t>> {
-        if b {
-            self.c_bool_true()
-        } else {
-            self.c_bool_false()
-        }
-    }
 
     /// Whether `e` is an application `@eagerReduce A a`, by which a term
     /// asks for its argument to be reduced without waiting for the argument
@@ -594,29 +577,9 @@ impl<'t, 'p: 't> TcCtx<'t, 'p> {
         false
     }
 
-    pub(crate) fn c_bool_true(&mut self) -> Option<ExprPtr<'t>> {
-        let n = self.export_file.name_cache.bool_true?;
-        let levels = self.alloc_levels_slice(&[]);
-        Some(self.mk_const(n, levels))
-    }
 
-    pub(crate) fn c_bool_false(&mut self) -> Option<ExprPtr<'t>> {
-        let n = self.export_file.name_cache.bool_false?;
-        let levels = self.alloc_levels_slice(&[]);
-        Some(self.mk_const(n, levels))
-    }
 
-    pub(crate) fn c_nat_zero(&mut self) -> Option<ExprPtr<'t>> {
-        let n = self.export_file.name_cache.nat_zero?;
-        let levels = self.alloc_levels_slice(&[]);
-        Some(self.mk_const(n, levels))
-    }
 
-    pub(crate) fn c_nat_succ(&mut self) -> Option<ExprPtr<'t>> {
-        let n = self.export_file.name_cache.nat_succ?;
-        let levels = self.alloc_levels_slice(&[]);
-        Some(self.mk_const(n, levels))
-    }
 
     /// Make `Const("Nat", [])`
     pub(crate) fn nat_type(&mut self) -> Option<ExprPtr<'t>> {

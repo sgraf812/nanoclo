@@ -12,9 +12,7 @@
 
 use crate::expr::{BinderStyle, Expr};
 use crate::tc::TypeChecker;
-use crate::util::{
-    new_fx_hash_map, new_fx_hash_set, ExprPtr, FxHashMap, FxHashSet,
-};
+use crate::util::{new_fx_hash_map, ExprPtr, FxHashMap};
 use Expr::*;
 
 pub(crate) type EnvId = u32;

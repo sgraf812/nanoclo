@@ -6,7 +6,6 @@ use crate::expr::Expr;
 use crate::util::{
     ExportFile, ExprPtr, LevelPtr, LevelsPtr, NamePtr, TcCtx,
 };
-use num_traits::Zero;
 use std::error::Error;
 
 /// Conversion steps one speculative comparison may spend, counting everything

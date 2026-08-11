@@ -120,6 +120,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Some(r) = self.nb_conv_nat::<RIGID>(depth, x, y) {
             return r;
         }
+        if let Some(r) = self.nb_conv_str::<RIGID>(depth, x, y) {
+            return r;
+        }
         if self.nb_unify_direct::<RIGID>(depth, x, y) {
             return true;
         }
@@ -567,6 +570,42 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         match (px, py) {
             (Some(a), Some(b)) => Some(self.nb_unify::<RIGID>(depth, a, b)),
             _ => None,
+        }
+    }
+
+    /// A string literal and the constructor application it denotes stand
+    /// for the same string, so `"ab"` meets `String.mk ['a', 'b']` as the
+    /// list of characters it spells out.
+    fn nb_conv_str<const RIGID: bool>(
+        &mut self,
+        depth: u32,
+        x: ValId,
+        y: ValId,
+    ) -> Option<bool> {
+        let lit_x = matches!(self.ctx.nb.get(x), Value::StrLit { .. });
+        let lit_y = matches!(self.ctx.nb.get(y), Value::StrLit { .. });
+        if lit_x == lit_y {
+            return None;
+        }
+        let (lit, other) = if lit_x { (x, y) } else { (y, x) };
+        if !self.nb_is_string_ctor(other) {
+            return None;
+        }
+        let Value::StrLit { ptr } = self.ctx.nb.get(lit) else {
+            return None;
+        };
+        let c = self.nb_str_to_ctor(depth, ptr)?;
+        Some(self.nb_unify::<RIGID>(depth, c, other))
+    }
+
+    fn nb_is_string_ctor(&self, v: ValId) -> bool {
+        match self.ctx.nb.get(v) {
+            Value::Rigid { head: RigidHead::Const(_, name, _), .. }
+            | Value::Unfold { name, .. } => {
+                let nc = &self.ctx.export_file.name_cache;
+                Some(name) == nc.string_mk || Some(name) == nc.string_of_list
+            }
+            _ => false,
         }
     }
 

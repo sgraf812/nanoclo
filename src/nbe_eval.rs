@@ -190,6 +190,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Some(&v) = self.ctx.nb.const_val_cache.get(&(name, levels)) {
             return v;
         }
+        {
+            // These two reduce by running compiled code, which a checker
+            // reading an export file cannot do. The memo above makes this
+            // one comparison per constant the declaration evaluates.
+            let nc = &self.ctx.export_file.name_cache;
+            if Some(name) == nc.reduce_bool || Some(name) == nc.reduce_nat {
+                panic!("native reduction (Lean.reduceBool/Lean.reduceNat) not supported");
+            }
+        }
         let v = match self.env.get_declar(&name) {
             Some(Declar::Definition { .. } | Declar::Theorem { .. }) => {
                 self.ctx.nb.mk_unfold(name, levels, SPINE_EMPTY)
@@ -677,7 +686,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn nb_str_to_ctor(&mut self, depth: u32, s: StringPtr<'t>) -> Option<ValId> {
+    pub(crate) fn nb_str_to_ctor(&mut self, depth: u32, s: StringPtr<'t>) -> Option<ValId> {
         let e = self.ctx.str_lit_to_constructor(s)?;
         let v = self.nb_eval(depth, VENV_NIL, e);
         Some(self.nb_whnf(depth, v))
