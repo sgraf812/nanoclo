@@ -73,14 +73,25 @@ fn pack_entry_key(env: EnvId, entry: Entry) -> (u64, u64) {
 
 /// The loose bvar indices an expression reads. `Dense` is every index below
 /// its range, so projecting an environment onto it changes nothing; `Mask` is
-/// exact for a range that fits a word; `Wide` is a range beyond a word that is
-/// not dense.
+/// exact for a set that fits a word; `Wide` is exact for a set that reaches
+/// past a word, up to `MAX_USES_WORDS` words; `Deep` stands for a set past
+/// that bound, which keys on the whole environment like `Dense`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Uses {
     Dense,
     Mask(u64),
-    Wide,
+    /// A read set reaching past index 63, held out of line: the id names an
+    /// interned word vector in `wide_uses`, bit `i` of word `i / 64`
+    /// standing for de Bruijn index `i`.
+    Wide(u32),
+    Deep,
 }
+
+/// Words a wide read set may span; a set reaching further becomes `Deep`.
+/// A set costs one vector operation per word at every node above it, and
+/// binder chains reach depths in the thousands, so the bound keeps the cost
+/// of one node at a few words.
+const MAX_USES_WORDS: usize = 8;
 
 pub(crate) struct CloState<'t> {
     pub(crate) envs: Vec<EnvNode<'t>>,
@@ -101,6 +112,11 @@ pub(crate) struct CloState<'t> {
     /// projection depends on the set and not on the expression that induced
     /// it, so expressions reading the same positions share one projection.
     pub(crate) proj_cache: FxHashMap<(u64, EnvId), EnvId>,
+    /// the word vectors `Uses::Wide` ids name, interned per declaration
+    pub(crate) wide_uses: Vec<Box<[u64]>>,
+    pub(crate) wide_intern: FxHashMap<Box<[u64]>, u32>,
+    /// `proj_cache` for wide read sets, keyed by the interned set id
+    pub(crate) proj_cache_w: FxHashMap<(u32, EnvId), EnvId>,
     /// keyed by the packed `(ae|aenv, be|benv, aoff|boff)` triple
     pub(crate) eq_mod_cache: Gen2<(u64, u64, u32), bool>,
 
@@ -156,6 +172,9 @@ impl<'t> CloState<'t> {
             prop_cache: new_fx_hash_map(),
             umask_cache: new_fx_hash_map(),
             proj_cache: new_fx_hash_map(),
+            wide_uses: Vec::new(),
+            wide_intern: new_fx_hash_map(),
+            proj_cache_w: new_fx_hash_map(),
             eq_mod_cache: Gen2::new(),
             g_unfold: new_fx_hash_map(),
             g_inst_ty: new_fx_hash_map(),
@@ -191,6 +210,9 @@ impl<'t> CloState<'t> {
         rm(&mut self.prop_cache);
         rm(&mut self.umask_cache);
         rm(&mut self.proj_cache);
+        self.wide_uses.clear();
+        rm(&mut self.wide_intern);
+        rm(&mut self.proj_cache_w);
         self.eq_mod_cache.reset_decl();
     }
 
@@ -383,46 +405,143 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Some(&u) = self.ctx.rp.umask_cache.get(&e) {
             return u;
         }
-        fn join(a: Uses, b: Uses) -> Uses {
-            match (a, b) {
-                (Uses::Mask(x), Uses::Mask(y)) => Uses::Mask(x | y),
-                _ => Uses::Wide,
-            }
-        }
-        fn under(u: Uses) -> Uses {
-            match u {
-                Uses::Mask(m) => Uses::Mask(m >> 1),
-                other => other,
-            }
-        }
         let u = match n {
             Var { dbj_idx, .. } if dbj_idx < 64 => Uses::Mask(1u64 << dbj_idx),
-            Var { .. } => Uses::Wide,
+            Var { dbj_idx, .. } if usize::from(dbj_idx) < 64 * MAX_USES_WORDS => {
+                let mut w = vec![0u64; usize::from(dbj_idx) / 64 + 1];
+                w[usize::from(dbj_idx) / 64] = 1u64 << (dbj_idx % 64);
+                self.intern_uses(w)
+            }
+            Var { .. } => Uses::Deep,
             App { fun, arg, .. } => {
-                let a = self.uses_mask(fun);
-                let b = self.uses_mask(arg);
-                join(a, b)
+                let a = self.uses_undense(fun);
+                let b = self.uses_undense(arg);
+                self.join_uses(a, b)
             }
             Lambda { binder_type, body, .. } | Pi { binder_type, body, .. } => {
-                let d = self.uses_mask(binder_type);
-                let b = self.uses_mask(body);
-                join(d, under(b))
+                let d = self.uses_undense(binder_type);
+                let b = self.uses_undense(body);
+                let b = self.under_uses(b);
+                self.join_uses(d, b)
             }
             Let { binder_type, val, body, .. } => {
-                let t = self.uses_mask(binder_type);
-                let v = self.uses_mask(val);
-                let b = self.uses_mask(body);
-                join(join(t, v), under(b))
+                let t = self.uses_undense(binder_type);
+                let v = self.uses_undense(val);
+                let b = self.uses_undense(body);
+                let b = self.under_uses(b);
+                let tv = self.join_uses(t, v);
+                self.join_uses(tv, b)
             }
-            Proj { structure, .. } => self.uses_mask(structure),
+            Proj { structure, .. } => self.uses_undense(structure),
             _ => Uses::Mask(0),
         };
         let u = match u {
             Uses::Mask(m) if lbr <= 64 && m == u64::MAX >> (64 - lbr) => Uses::Dense,
+            Uses::Wide(id) => {
+                let w = &self.ctx.rp.wide_uses[id as usize];
+                let lbr = u32::from(lbr);
+                let full = w.len() == (lbr as usize + 63) / 64
+                    && w.iter().enumerate().all(|(i, &x)| {
+                        let hi = (lbr - (i as u32) * 64).min(64);
+                        x == u64::MAX >> (64 - hi)
+                    });
+                if full { Uses::Dense } else { Uses::Wide(id) }
+            }
             u => u,
         };
         self.ctx.rp.umask_cache.insert(e, u);
         u
+    }
+
+    /// The read set of a subterm with `Dense` spelled out: a parent combines
+    /// its children's sets bit by bit, so a set summarized as "all of the
+    /// child's range" re-enters as that explicit range.
+    fn uses_undense(&mut self, e: ExprPtr<'t>) -> Uses {
+        match self.uses_mask(e) {
+            Uses::Dense => {
+                let lbr = usize::from(self.lbr(e));
+                debug_assert!(lbr > 0);
+                if lbr <= 64 {
+                    return Uses::Mask(u64::MAX >> (64 - lbr));
+                }
+                if lbr > 64 * MAX_USES_WORDS {
+                    return Uses::Deep;
+                }
+                let mut w = vec![u64::MAX; lbr / 64];
+                if lbr % 64 > 0 {
+                    w.push(u64::MAX >> (64 - lbr % 64));
+                }
+                self.intern_uses(w)
+            }
+            u => u,
+        }
+    }
+
+    /// The word vector behind a read set, canonicalized and interned: trailing
+    /// zero words dropped, a set fitting one word demoted to `Mask`.
+    fn intern_uses(&mut self, mut w: Vec<u64>) -> Uses {
+        while w.len() > 1 && *w.last().unwrap() == 0 {
+            w.pop();
+        }
+        if w.len() == 1 {
+            return Uses::Mask(w[0]);
+        }
+        if w.len() > MAX_USES_WORDS {
+            return Uses::Deep;
+        }
+        let b: Box<[u64]> = w.into_boxed_slice();
+        if let Some(&id) = self.ctx.rp.wide_intern.get(&b) {
+            return Uses::Wide(id);
+        }
+        let id = u32::try_from(self.ctx.rp.wide_uses.len()).unwrap();
+        self.ctx.rp.wide_uses.push(b.clone());
+        self.ctx.rp.wide_intern.insert(b, id);
+        Uses::Wide(id)
+    }
+
+    fn join_uses(&mut self, a: Uses, b: Uses) -> Uses {
+        match (a, b) {
+            (Uses::Mask(x), Uses::Mask(y)) => Uses::Mask(x | y),
+            (Uses::Deep, _) | (_, Uses::Deep) => Uses::Deep,
+            (Uses::Dense, _) | (_, Uses::Dense) => unreachable!("Dense joined"),
+            (Uses::Wide(i), Uses::Mask(m)) | (Uses::Mask(m), Uses::Wide(i)) => {
+                let mut w = self.ctx.rp.wide_uses[i as usize].to_vec();
+                w[0] |= m;
+                self.intern_uses(w)
+            }
+            (Uses::Wide(i), Uses::Wide(j)) => {
+                if i == j {
+                    return a;
+                }
+                let (x, y) = (
+                    &self.ctx.rp.wide_uses[i as usize],
+                    &self.ctx.rp.wide_uses[j as usize],
+                );
+                let (long, short) = if x.len() >= y.len() { (x, y) } else { (y, x) };
+                let mut w = long.to_vec();
+                for (wd, &s) in w.iter_mut().zip(short.iter()) {
+                    *wd |= s;
+                }
+                self.intern_uses(w)
+            }
+        }
+    }
+
+    fn under_uses(&mut self, u: Uses) -> Uses {
+        match u {
+            Uses::Mask(m) => Uses::Mask(m >> 1),
+            Uses::Deep => Uses::Deep,
+            Uses::Dense => unreachable!("Dense under a binder"),
+            Uses::Wide(i) => {
+                let src = &self.ctx.rp.wide_uses[i as usize];
+                let mut w = Vec::with_capacity(src.len());
+                for k in 0..src.len() {
+                    let hi = src.get(k + 1).copied().unwrap_or(0);
+                    w.push((src[k] >> 1) | (hi << 63));
+                }
+                self.intern_uses(w)
+            }
+        }
     }
 
     /// entry for de Bruijn index `i` (0 = innermost)
@@ -482,7 +601,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mask = match self.uses_mask(c.e) {
             Uses::Mask(0) => return Clo::of(c.e),
             Uses::Mask(m) => m,
-            Uses::Dense | Uses::Wide => return c,
+            Uses::Dense | Uses::Deep => return c,
+            Uses::Wide(id) => {
+                return Clo { e: c.e, env: self.project_wide(id, c.env) };
+            }
         };
         Clo { e: c.e, env: self.project(mask, c.env) }
     }
@@ -524,6 +646,41 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             proj = self.push_entry(proj, entry);
         }
         self.ctx.rp.proj_cache.insert((mask, env), proj);
+        proj
+    }
+
+    /// `project` for a wide read set: one walk down the chain collects the
+    /// named entries in order, innermost first, and the projection is rebuilt
+    /// from them the way the one-word case rebuilds from `picked`.
+    fn project_wide(&mut self, id: u32, env: EnvId) -> EnvId {
+        if let Some(&p) = self.ctx.rp.proj_cache_w.get(&(id, env)) {
+            return p;
+        }
+        let words = &self.ctx.rp.wide_uses[id as usize];
+        let top = words.len() * 64 - 1 - words.last().unwrap().leading_zeros() as usize;
+        let mut picked: Vec<Entry<'t>> = Vec::with_capacity(
+            words.iter().map(|w| w.count_ones() as usize).sum(),
+        );
+        {
+            let rp = &self.ctx.rp;
+            let words = &rp.wide_uses[id as usize];
+            let mut cur = env;
+            for d in 0..=top {
+                if cur == ENV_NIL {
+                    return env;
+                }
+                let node = &rp.envs[cur as usize];
+                if words[d / 64] & (1u64 << (d % 64)) != 0 {
+                    picked.push(node.entry);
+                }
+                cur = node.parent;
+            }
+        }
+        let mut proj = ENV_NIL;
+        for entry in picked {
+            proj = self.push_entry(proj, entry);
+        }
+        self.ctx.rp.proj_cache_w.insert((id, env), proj);
         proj
     }
 
