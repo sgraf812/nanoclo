@@ -172,8 +172,16 @@ pub(crate) struct Vals<'t> {
 
 impl<'t> Vals<'t> {
     pub(crate) fn new() -> Self {
+        // The interning tables are built once per checking thread and kept
+        // across declarations, so starting them at the size a mid-sized
+        // declaration reaches spends one allocation instead of a rehash per
+        // doubling on the way there.
+        const PRE: usize = 1 << 14;
+        fn pre<K: std::hash::Hash + Eq, V>() -> FxHashMap<K, V> {
+            FxHashMap::with_capacity_and_hasher(PRE, Default::default())
+        }
         Vals {
-            vals: Vec::new(),
+            vals: Vec::with_capacity(PRE),
             // index 0 of each of these arenas is the empty case, so that
             // VENV_NIL and SPINE_EMPTY are valid indices needing no special
             // casing on the lookup paths.
@@ -185,17 +193,17 @@ impl<'t> Vals<'t> {
                 parent: 0,
                 len: 0,
             }],
-            spine_intern_app: new_fx_hash_map(),
+            spine_intern_app: pre(),
             spine_intern_proj: new_fx_hash_map(),
-            rigid_intern: new_fx_hash_map(),
-            unfold_intern: new_fx_hash_map(),
-            lam_intern: new_fx_hash_map(),
+            rigid_intern: pre(),
+            unfold_intern: pre(),
+            lam_intern: pre(),
             pi_intern: new_fx_hash_map(),
             sort_intern: new_fx_hash_map(),
             nat_intern: new_fx_hash_map(),
             str_intern: new_fx_hash_map(),
-            thunk_intern: new_fx_hash_map(),
-            clo_val_cache: new_fx_hash_map(),
+            thunk_intern: pre(),
+            clo_val_cache: pre(),
             unfold_cache: new_fx_hash_map(),
             const_val_cache: new_fx_hash_map(),
             const_ty_cache: new_fx_hash_map(),
