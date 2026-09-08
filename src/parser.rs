@@ -57,9 +57,9 @@ pub struct Parser<'a, R: BufRead> {
     scratch_idxs: Vec<u32>
 }
 
-/// An export index far beyond the file's own size is malformed rather than
-/// merely sparse; refuse to allocate a translation table for it.
-const MAX_EXPORT_INDEX: u32 = 1 << 28;
+/// An export index at or above 2^31 overflows the 31-bit dag index a `Ptr`
+/// carries; refuse to allocate a translation table for it.
+const MAX_EXPORT_INDEX: u32 = 1 << 31;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
 struct LeanMeta<'a> {
