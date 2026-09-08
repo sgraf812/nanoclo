@@ -243,7 +243,12 @@ pub struct ExportFile<'p> {
     pub name_cache: NameCache<'p>,
     pub config: Config,
     // Information used for setting EnvLimit during inductive checking.
-    pub mutual_block_sizes: FxHashMap<NamePtr<'p>, (usize, usize)>
+    pub mutual_block_sizes: FxHashMap<NamePtr<'p>, (usize, usize)>,
+    /// Maps each inductive name to the names of the exported recursors whose
+    /// `all_inductives` list contains it. Checking an inductive declaration
+    /// requires this set to equal the set of recursor names derived from the
+    /// declaration, so the export cannot smuggle in a recursor of its own.
+    pub(crate) ind_name_to_recursor_names: FxHashMap<NamePtr<'p>, FxHashSet<NamePtr<'p>>>
 }
 
 impl<'p> ExportFile<'p> {

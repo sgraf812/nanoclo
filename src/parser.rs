@@ -685,13 +685,28 @@ pub(crate) fn parse_export_file<'p, R: BufRead>(
     }
     
     let name_cache = parser.dag.mk_name_cache();
+    // Maps each inductive name to the exported recursor names whose `all_inductives`
+    // list contains it. Checking an inductive declaration compares this set against
+    // the recursor names derived from the declaration.
+    let mut ind_name_to_recursor_names = new_fx_hash_map();
+    for declar in parser.declars.values() {
+        if let Declar::Recursor(RecursorData { all_inductives, info, .. }) = declar {
+            for ind_name in all_inductives.iter().copied() {
+                ind_name_to_recursor_names
+                    .entry(ind_name)
+                    .or_insert_with(crate::util::new_fx_hash_set)
+                    .insert(info.name);
+            }
+        }
+    }
     let export_file = crate::util::ExportFile {
         dag: parser.dag,
         declars: parser.declars,
         notations: parser.notations,
         name_cache,
         config: parser.config,
-        mutual_block_sizes: parser.mutual_block_sizes
+        mutual_block_sizes: parser.mutual_block_sizes,
+        ind_name_to_recursor_names
     };
     Ok((export_file, parser.skipped))
 }

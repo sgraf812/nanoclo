@@ -83,12 +83,51 @@ impl<'p> ExportFile<'p> {
                 }),
             Constructor(ctor_data) => {
                 ctx.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap());
-                assert!(self.declars.get(&ctor_data.inductive_name).is_some());
+                match self.declars.get(&ctor_data.inductive_name) {
+                    Some(Declar::Inductive(ind)) => assert!(
+                        ind.all_ctor_names.contains(&ctor_data.info.name),
+                        "constructor {:?} is not a constructor of its inductive type {:?}",
+                        ctx.debug_print(ctor_data.info.name),
+                        ctx.debug_print(ctor_data.inductive_name),
+                    ),
+                    _ => panic!(
+                        "constructor {:?} names {:?} as its inductive type, which is not an inductive declaration",
+                        ctx.debug_print(ctor_data.info.name),
+                        ctx.debug_print(ctor_data.inductive_name),
+                    ),
+                }
             }
             Recursor(recursor_data) => {
                 ctx.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap());
+                match recursor_data.all_inductives.first() {
+                    Some(ind_name) => match self.declars.get(ind_name) {
+                        Some(Declar::Inductive(..)) => (),
+                        _ => panic!(
+                            "recursor {:?} names {:?} in `all_inductives`, which is not an inductive declaration",
+                            ctx.debug_print(recursor_data.info.name),
+                            ctx.debug_print(*ind_name),
+                        ),
+                    },
+                    None => panic!(
+                        "recursor {:?} has an empty `all_inductives` list; a recursor must be derived from an inductive declaration",
+                        ctx.debug_print(recursor_data.info.name),
+                    ),
+                }
+                let recursor_idx = self.declars.get_index_of(&recursor_data.info.name).unwrap();
                 for ind_name in recursor_data.all_inductives.iter() {
-                    assert!(self.declars.get(ind_name).is_some())
+                    match self.declars.get_index_of(ind_name) {
+                        Some(ind_idx) => assert!(
+                            ind_idx < recursor_idx,
+                            "recursor {:?} is exported before its inductive type {:?}",
+                            ctx.debug_print(recursor_data.info.name),
+                            ctx.debug_print(*ind_name),
+                        ),
+                        None => panic!(
+                            "recursor {:?} names {:?} in `all_inductives`, which has no declaration in the export",
+                            ctx.debug_print(recursor_data.info.name),
+                            ctx.debug_print(*ind_name),
+                        ),
+                    }
                 }
             }
         }
