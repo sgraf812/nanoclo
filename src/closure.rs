@@ -146,22 +146,22 @@ pub(crate) struct CloState<'t> {
     /// diagnostic counters: [infer, whnf_core, whnf, def_eq, whnf_hit,
     /// whnf_miss, whnf_core_hit, whnf_core_miss, unfold_hit, unfold_miss,
     /// push_entry, eq_mod]
-    pub(crate) ctrs: [u64; 25],
+    pub(crate) ctrs: [u64; 26],
 }
 
 /// Totals over all declarations, printed at exit when `NANOCLO_CTRS` is set.
-pub static G_CTRS: [std::sync::atomic::AtomicU64; 25] =
-    [const { std::sync::atomic::AtomicU64::new(0) }; 25];
+pub static G_CTRS: [std::sync::atomic::AtomicU64; 26] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 26];
 
 pub fn ctrs_report() -> String {
     use std::sync::atomic::Ordering::Relaxed;
-    const NAMES: [&str; 25] = [
+    const NAMES: [&str; 26] = [
         "infer", "whnf_core", "whnf", "def_eq", "whnf_hit", "whnf_miss",
         "deq_hit", "deq_miss", "unfold_hit", "unfold_miss",
         "push_entry", "eq_mod", "eqm_hit", "eqm_miss", "eqm_fast", "eqm_nomemo",
         "inf_hit", "inf_miss", "inf_var_val", "inf_var_neu",
         "inf_local", "inf_sort", "inf_const",
-        "spec_fail", "spec_abort",
+        "spec_fail", "spec_abort", "probe_fail_hit",
     ];
     let mut out = String::new();
     for (n, c) in NAMES.iter().zip(G_CTRS.iter()) {
@@ -192,7 +192,7 @@ impl<'t> CloState<'t> {
             eq_mod_cache: Gen2::new(),
             g_unfold: new_fx_hash_map(),
             g_inst_ty: new_fx_hash_map(),
-            ctrs: [0; 25],
+            ctrs: [0; 26],
         }
     }
 

@@ -217,7 +217,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     return true;
                 }
                 if heads_match {
-                    return self.nb_unfold_pair(depth, x, y);
+                    let r = self.nb_unfold_pair(depth, x, y);
+                    self.ctx.nb.probe_escalate = 0;
+                    return r;
                 }
                 // Unfold the one whose definition is nearer the leaves, so
                 // the two meet at a shared subterm rather than at normal
@@ -354,7 +356,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let x2 = self.nb_iota(depth, x).unwrap_or(x);
         let y2 = self.nb_iota(depth, y).unwrap_or(y);
         if x2 != x || y2 != y {
-            return self.nb_unify::<true>(depth, x2, y2);
+            let r = self.nb_unify::<true>(depth, x2, y2);
+            self.ctx.nb.probe_escalate = 0;
+            return r;
         }
         heads_match && self.nb_unify_spine::<true>(depth, sx, sy)
     }
@@ -362,9 +366,22 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Compare the arguments of two applications of one constant, recording
     /// failures apart so that they are dropped when the guess is.
     fn nb_spine_probe(&mut self, depth: u32, sx: SpineId, sy: SpineId) -> bool {
+        let key = if sx < sy { (sx, sy) } else { (sy, sx) };
+        if self.ctx.nb.probe_fail.contains(&key) {
+            self.ctx.rp.ctrs[25] += 1;
+            return false;
+        }
         let outer = self.ctx.nb.probe_depth == 0;
+        let mut granted = 0;
         if outer {
-            self.ctx.nb.probe_fuel = SPEC_BUDGET;
+            // An aborted probe hands its doubled grant one step down the
+            // unfold chain; an independent probe starts at the base again.
+            granted = if self.ctx.nb.probe_escalate > 0 {
+                std::mem::take(&mut self.ctx.nb.probe_escalate)
+            } else {
+                SPEC_BUDGET
+            };
+            self.ctx.nb.probe_fuel = granted;
             self.ctx.nb.probe_aborted = false;
         }
         self.ctx.nb.probe_depth += 1;
@@ -378,7 +395,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if self.ctx.nb.probe_aborted {
                 self.ctx.nb.probe_aborted = false;
                 self.ctx.rp.ctrs[24] += 1;
+                self.ctx.nb.probe_fail.insert(key);
+                const ESCALATE_CAP: u64 = 1 << 20;
+                self.ctx.nb.probe_escalate = (granted * 2).min(ESCALATE_CAP);
                 return false;
+            }
+            if !r {
+                self.ctx.nb.probe_fail.insert(key);
             }
         }
         r

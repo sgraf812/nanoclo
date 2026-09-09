@@ -162,10 +162,18 @@ pub(crate) struct Vals<'t> {
     /// the same constant. That comparison is a guess that may fail while the
     /// terms are still equal, so its failures are dropped when the guess is.
     pub(crate) conv_neg_probe: FxHashSet<(ValId, ValId)>,
+    /// Spine pairs whose speculative comparison settled false or exhausted
+    /// its budget. A pair in this set goes straight to the unfolding route,
+    /// so a mistaken bet pays its budget once.
+    pub(crate) probe_fail: FxHashSet<(SpineId, SpineId)>,
     pub(crate) probe_depth: u32,
     /// Conversion steps the running speculation may still spend; one budget
     /// covers a comparison and everything it nests.
     pub(crate) probe_fuel: u64,
+    /// Fuel granted to the next probe of an abort's own continuation: an
+    /// aborted probe hands its doubled grant one step down the unfold
+    /// chain, and the grant returns to the base once the chain resolves.
+    pub(crate) probe_escalate: u64,
     pub(crate) probe_aborted: bool,
     pub(crate) in_conv: u32,
 }
@@ -217,8 +225,10 @@ impl<'t> Vals<'t> {
             conv_pos: new_fx_hash_set(),
             conv_neg: new_fx_hash_set(),
             conv_neg_probe: new_fx_hash_set(),
+            probe_fail: new_fx_hash_set(),
             probe_depth: 0,
             probe_fuel: 0,
+            probe_escalate: 0,
             probe_aborted: false,
             in_conv: 0,
         }
@@ -274,8 +284,10 @@ impl<'t> Vals<'t> {
         rs(&mut self.conv_pos);
         rs(&mut self.conv_neg);
         rs(&mut self.conv_neg_probe);
+        rs(&mut self.probe_fail);
         self.probe_depth = 0;
         self.probe_fuel = 0;
+        self.probe_escalate = 0;
         self.probe_aborted = false;
     }
 

@@ -8,10 +8,11 @@ use crate::util::{
 };
 use std::error::Error;
 
-/// Conversion steps one speculative comparison may spend, counting everything
-/// it nests. Chosen so that the comparisons which settle a pair on the
-/// corpora finish inside it: raising it to 65536 costs `discarded-argument`
-/// its bound, lowering it to 1024 costs `args-before-unfold` its answer.
+/// Conversion steps a fresh speculative comparison may spend, counting
+/// everything it nests. An aborted probe doubles the grant for the probe
+/// its unfolding launches next, so a comparison that keeps meeting the same
+/// guess reaches the budget it needs geometrically; `args-before-unfold`
+/// sizes the base, `discarded-argument` pays it once per wrong guess.
 pub(crate) const SPEC_BUDGET: u64 = 4096;
 
 
@@ -641,7 +642,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     ) -> ExprPtr<'t> {
         let info = match self.env.get_declar(&name) {
             Some(d) => *d.info(),
-            None => panic!("unknown constant in infer_const"),
+            None => panic!("unknown constant in infer_const: {:?}", self.ctx.debug_print(name)),
         };
         assert_eq!(
             self.ctx.read_levels(levels).len(),
