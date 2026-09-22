@@ -395,7 +395,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let v = self.nb_whnf(0, v);
         match self.ctx.nb.get(v) {
             crate::nbe::Value::Sort { level } => self.ctx.is_zero(level),
-            _ => false,
+            _ => panic!("expected a sort"),
         }
     }
 
@@ -403,7 +403,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let ty = self.infer_then_whnf(e, InferOnly);
         match self.ctx.read_expr(ty) {
             Sort { level, .. } => (self.ctx.is_zero(level), ty),
-            _ => (false, ty),
+            _ => panic!("expected a sort"),
         }
     }
 
@@ -516,7 +516,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let v = self.nb_whnf(0, v);
         match self.ctx.nb.get(v) {
             crate::nbe::Value::Sort { level } => self.ctx.may_be_prop(level),
-            _ => false,
+            _ => panic!("expected a sort"),
         }
     }
 

@@ -5,28 +5,40 @@ use crate::util::{new_fx_hash_set, ExportFile, ExprPtr, FxHashSet, FxIndexMap, L
 use std::sync::Arc;
 
 impl<'t, 'p: 't> ExportFile<'p> {
+    /// Whether a constructor of the inductive type `ind_name` mentions a type
+    /// of its mutual block in an argument type.
+    fn ind_member_is_recursive(&'t self, ctx: &mut TcCtx<'t, 'p>, ind_name: &NamePtr<'t>) -> bool {
+        match self.declars.get(ind_name).unwrap() {
+            Declar::Inductive(ind) => {
+                for ctor_name in ind.all_ctor_names.iter() {
+                    match self.declars.get(ctor_name).unwrap() {
+                        Declar::Constructor(ctor_data @ ConstructorData {..}) => {
+                            let mut ctor_ty = ctor_data.info.ty;
+                            while let Pi {binder_type, body, ..} = ctx.read_expr(ctor_ty) {
+                                if ctx.find_const(binder_type, |n| ind.all_ind_names.iter().any(|nn| n == *nn)) {
+                                    return true
+                                }
+                                ctor_ty = body;
+                            }
+                        },
+                        _ => panic!("expected constructor")
+                    }
+                }
+                false
+            },
+            _ => panic!("expected inductive declar")
+        }
+    }
+
     pub(crate) fn check_inductive_declar_in(&'t self, ctx: &mut TcCtx<'t, 'p>, d: &Declar<'t>) {
         let (ind, env_limit) = match d {
             Declar::Inductive(ind) => {
-                // Assert computed `is_recursive` value matches the export file.
-                let is_recursive = (|| {
-                    for ctor_name in ind.all_ctor_names.iter() {
-                        match self.declars.get(ctor_name).unwrap() {
-                            Declar::Constructor(ctor_data @ ConstructorData {..}) => {
-                                let mut ctor_ty = ctor_data.info.ty;
-                                while let Pi {binder_type, body, ..} = ctx.read_expr(ctor_ty) {
-                                    if ctx.find_const(binder_type, |n| ind.all_ind_names.iter().any(|nn| n == *nn)) {
-                                        return true
-                                    }
-                                    ctor_ty = body;
-                                }
-                            },
-                            _ => panic!("expected constructor")
-                        }
-                    }
-                    false
-                })();
-                assert_eq!(ind.is_recursive, is_recursive);
+                // Assert the computed `is_recursive` value matches the export file.
+                // Lean marks every type of a mutual block recursive when any member
+                // of the block is recursive.
+                let block_is_recursive =
+                    ind.all_ind_names.iter().any(|n| self.ind_member_is_recursive(ctx, n));
+                assert_eq!(ind.is_recursive, block_is_recursive);
                 self.with_ctx(|ctx| {
                     let nested_pfx = ctx.str1("_nested");
                     assert!(!ctx.has_nested_pfx(ind.info.ty, nested_pfx));
