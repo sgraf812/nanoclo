@@ -92,6 +92,17 @@ pub(crate) fn new_fx_hash_map<K, V>() -> FxHashMap<K, V> { FxHashMap::with_hashe
 
 pub(crate) fn new_fx_hash_set<K>() -> FxHashSet<K> { FxHashSet::with_hasher(Default::default()) }
 
+/// Empty a per-call cache. A cache that grew past 1024 slots is replaced by a
+/// fresh map, so one oversized call releases its memory instead of pinning it
+/// for the rest of the declaration.
+pub(crate) fn clear_or_shrink<K, V>(m: &mut FxHashMap<K, V>) {
+    if m.capacity() > 1024 {
+        *m = new_fx_hash_map();
+    } else {
+        m.clear();
+    }
+}
+
 pub(crate) fn new_fx_index_set<K>() -> FxIndexSet<K> { FxIndexSet::with_hasher(Default::default()) }
 pub(crate) fn new_unique_index_set<K>() -> UniqueIndexSet<K> { UniqueIndexSet::with_hasher(Default::default()) }
 
