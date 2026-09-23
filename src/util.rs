@@ -1074,12 +1074,17 @@ impl Config {
     pub fn to_export_file<'a>(self) -> Result<(ExportFile<'a>, Vec<String>), Box<dyn Error>> {
         if let Some(pathbuf) = self.export_file_path.as_ref() {
             match OpenOptions::new().read(true).truncate(false).open(pathbuf) {
-                Ok(file) => crate::parser::parse_export_file(BufReader::new(file), self),
+                Ok(file) => {
+                    let input_len = file.metadata().ok().map(|m| m.len());
+                    crate::parser::parse_export_file(BufReader::new(file), self, input_len)
+                }
                 Err(e) => Err(Box::from(format!("Failed to open export file: {:?}", e))),
             }
         } else if self.use_stdin {
+            // Stdin redirected from a file has a length; a pipe has none.
+            let input_len = std::fs::metadata("/dev/stdin").ok().filter(|m| m.is_file()).map(|m| m.len());
             let reader = BufReader::new(std::io::stdin());
-            crate::parser::parse_export_file(reader, self)
+            crate::parser::parse_export_file(reader, self, input_len)
         } else {
             panic!("Configuration file must specify en export file path or \"use_stdin\": true")
         }

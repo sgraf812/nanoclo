@@ -649,12 +649,22 @@ impl<'s> Cur<'s> {
     }
 }
 
+/// Export bytes per expression, below the 53 to 59 that Init, Std and Mathlib
+/// spend. Reserving the expression table for `input_len / 48` entries lets it
+/// reach its final size without doubling. For Mathlib, the last doubling
+/// holds both copies of a 67-million-entry table at once and raises the peak
+/// resident size of the whole run from 5.8 GB to 6.8 GB.
+const EXPORT_BYTES_PER_EXPR: u64 = 48;
+
 pub(crate) fn parse_export_file<'p, R: BufRead>(
     buf_reader: R,
     config: Config,
-
+    input_len: Option<u64>,
 ) -> Result<(crate::util::ExportFile<'p>, Vec<String>), Box<dyn Error>> {
     let mut parser = Parser::new(buf_reader, config);
+    if let Some(len) = input_len {
+        parser.dag.exprs.reserve(usize::try_from(len / EXPORT_BYTES_PER_EXPR).unwrap_or(0));
+    }
     let mut line_buffer = String::new();
 
     loop {
