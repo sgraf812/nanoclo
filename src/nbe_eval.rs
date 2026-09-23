@@ -476,6 +476,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             } else {
                 self.ctx.subst_expr_levels(val, uparams, levels)
             };
+            // A definition runs its fused body (`fuse.rs`); a theorem's
+            // value is evaluated as written.
+            let val = if matches!(self.env.get_declar(&name), Some(crate::env::Declar::Definition { .. })) {
+                self.fused_value(name, levels, val)
+            } else {
+                val
+            };
             Some(self.nb_eval(0, VENV_NIL, val))
         })();
         self.ctx.nb.unfold_cache.insert((name, levels), r);
@@ -825,7 +832,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     #[inline]
     fn nat_ext(&self) -> bool { self.ctx.export_file.config.nat_extension }
 
-    fn nb_is_nat_prim(&self, name: NamePtr<'t>) -> bool {
+    pub(crate) fn nb_is_nat_prim(&self, name: NamePtr<'t>) -> bool {
         let nc = &self.ctx.export_file.name_cache;
         let n = Some(name);
         n == nc.nat_succ

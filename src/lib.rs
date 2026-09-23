@@ -8,6 +8,7 @@
 pub mod debug_printer;
 pub mod env;
 pub mod expr;
+pub(crate) mod fuse;
 pub mod inductive;
 pub mod level;
 pub mod name;

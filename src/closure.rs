@@ -12,7 +12,7 @@
 
 use crate::expr::{BinderStyle, Expr};
 use crate::tc::TypeChecker;
-use crate::util::{new_fx_hash_map, ExprPtr, FxHashMap};
+use crate::util::{new_fx_hash_map, ExprPtr, FxHashMap, NamePtr};
 use Expr::*;
 
 pub(crate) type EnvId = u32;
@@ -140,6 +140,13 @@ pub(crate) struct CloState<'t> {
     // inductive checking) is active.
     /// const expr -> its level-instantiated definition value
     pub(crate) g_unfold: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
+    /// `constant -> its fused value` (`fuse.rs`), under the discipline of
+    /// `g_unfold`
+    pub(crate) g_fused: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
+    /// `constant -> whether it is a recursion wrapper`
+    pub(crate) fuse_wrapper: FxHashMap<NamePtr<'t>, bool>,
+    /// `constant -> whether fusion unfolds it`
+    pub(crate) fuse_unfoldable: FxHashMap<NamePtr<'t>, bool>,
     /// const expr -> its level-instantiated type
     pub(crate) g_inst_ty: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
 
@@ -191,6 +198,9 @@ impl<'t> CloState<'t> {
             view_table: hashbrown::HashTable::new(),
             eq_mod_cache: Gen2::new(),
             g_unfold: new_fx_hash_map(),
+            g_fused: new_fx_hash_map(),
+            fuse_wrapper: new_fx_hash_map(),
+            fuse_unfoldable: new_fx_hash_map(),
             g_inst_ty: new_fx_hash_map(),
             ctrs: [0; 26],
         }
@@ -236,6 +246,9 @@ impl<'t> CloState<'t> {
     /// expression alone and so stay valid for as long as it does.
     pub(crate) fn reset_const_caches(&mut self) {
         self.g_unfold.clear();
+        self.g_fused.clear();
+        self.fuse_wrapper.clear();
+        self.fuse_unfoldable.clear();
         self.g_inst_ty.clear();
         self.umask_cache.clear();
         self.wide_uses.clear();
