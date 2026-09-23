@@ -70,6 +70,25 @@ impl<'p> ExportFile<'p> {
     /// first, so consecutive calls on one context check each declaration
     /// from the same state a fresh context would.
     pub fn check_declar_in<'t>(&'t self, ctx: &mut TcCtx<'t, 'p>, d: &Declar<'p>) {
+        // Without fusion first; a declaration that crosses `FUSE_GATE` is
+        // checked again from the start with fusion.
+        crate::fuse::quiet_retry_panics();
+        ctx.nb.fuse = false;
+        let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.check_declar_attempt(ctx, d)
+        }));
+        if let Err(payload) = first {
+            if !payload.is::<crate::fuse::FuseRetry>() {
+                std::panic::resume_unwind(payload);
+            }
+            crate::fuse::FUSE_RETRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            ctx.nb.fuse = true;
+            self.check_declar_attempt(ctx, d);
+            ctx.nb.fuse = false;
+        }
+    }
+
+    fn check_declar_attempt<'t>(&'t self, ctx: &mut TcCtx<'t, 'p>, d: &Declar<'p>) {
         ctx.reset_decl();
         use Declar::*;
         match d {

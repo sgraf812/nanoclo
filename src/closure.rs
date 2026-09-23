@@ -174,6 +174,7 @@ pub fn ctrs_report() -> String {
     for (n, c) in NAMES.iter().zip(G_CTRS.iter()) {
         out.push_str(&format!("{}={} ", n, c.load(Relaxed)));
     }
+    out.push_str(&format!("fuse_retry={} ", crate::fuse::FUSE_RETRIES.load(Relaxed)));
     out
 }
 

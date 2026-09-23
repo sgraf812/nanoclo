@@ -429,6 +429,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 }
             }
         }
+        if !self.ctx.nb.fuse && self.is_recursion_wrapper(name) {
+            self.ctx.nb.wrap_count += 1;
+            if self.ctx.nb.wrap_count > crate::fuse::FUSE_GATE {
+                std::panic::panic_any(crate::fuse::FuseRetry);
+            }
+        }
         let Some(head) = self.nb_unfold_const(name, levels) else {
             self.ctx.nb.set_forced(v, v);
             return v;
@@ -476,9 +482,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             } else {
                 self.ctx.subst_expr_levels(val, uparams, levels)
             };
-            // A definition runs its fused body (`fuse.rs`); a theorem's
-            // value is evaluated as written.
-            let val = if matches!(self.env.get_declar(&name), Some(crate::env::Declar::Definition { .. })) {
+            // With fusion on, a definition runs its fused body (`fuse.rs`);
+            // a theorem's value is always evaluated as written.
+            let val = if self.ctx.nb.fuse
+                && matches!(self.env.get_declar(&name), Some(crate::env::Declar::Definition { .. }))
+            {
                 self.fused_value(name, levels, val)
             } else {
                 val

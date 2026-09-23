@@ -18,6 +18,13 @@
 //! Every rewrite is a beta, delta, iota or projection step on a
 //! closed term, so the result is definitionally equal to the value. Only the
 //! evaluator reads fused bodies; inference never sees them.
+//!
+//! A fused body pays off where a declaration evaluates a recursive function
+//! on data, and costs where conversion settles a question by comparing two
+//! folded matcher or instance applications, which fusion has inlined. So a
+//! declaration is first checked without fusion; one that unfolds more than
+//! `FUSE_GATE` recursion wrappers is checked again from the start with it.
+//! Each attempt sees one shape of every definition body.
 
 use crate::env::{Declar, ReducibilityHint};
 use crate::expr::Expr::*;
@@ -39,6 +46,28 @@ const DUP_BUDGET: usize = 1 << 15;
 const MAX_UNFOLDS: u32 = 64;
 /// Occurrences counted before every variable is taken as duplicated.
 const COUNT_VISITS: usize = 20_000;
+/// Recursion wrapper unfoldings a declaration may perform before it is
+/// checked again with fusion.
+pub(crate) const FUSE_GATE: u64 = 20_000;
+
+/// Unwinds an attempt at a declaration that crossed `FUSE_GATE`.
+pub(crate) struct FuseRetry;
+
+/// Declarations checked a second time with fusion.
+pub static FUSE_RETRIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Keep the unwinding of an abandoned attempt out of the panic output.
+pub(crate) fn quiet_retry_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !info.payload().is::<FuseRetry>() {
+                prev(info)
+            }
+        }));
+    });
+}
 
 struct Fuser<'t> {
     memo: FxHashMap<ExprPtr<'t>, ExprPtr<'t>>,
@@ -87,7 +116,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Whether `name` is a definition the equation compiler generates to
     /// implement matching or structural recursion.
-    fn is_recursion_wrapper(&mut self, name: NamePtr<'t>) -> bool {
+    pub(crate) fn is_recursion_wrapper(&mut self, name: NamePtr<'t>) -> bool {
         if let Some(&w) = self.ctx.rp.fuse_wrapper.get(&name) {
             return w;
         }

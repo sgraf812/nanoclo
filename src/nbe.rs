@@ -176,6 +176,12 @@ pub(crate) struct Vals<'t> {
     pub(crate) probe_escalate: u64,
     pub(crate) probe_aborted: bool,
     pub(crate) in_conv: u32,
+    /// Whether definitions unfold to their fused values (`fuse.rs`). Fixed
+    /// for one attempt at a declaration.
+    pub(crate) fuse: bool,
+    /// Recursion wrapper unfoldings in this attempt, counted while `fuse` is
+    /// off.
+    pub(crate) wrap_count: u64,
 }
 
 impl<'t> Vals<'t> {
@@ -231,6 +237,8 @@ impl<'t> Vals<'t> {
             probe_escalate: 0,
             probe_aborted: false,
             in_conv: 0,
+            fuse: false,
+            wrap_count: 0,
         }
     }
 
@@ -289,6 +297,7 @@ impl<'t> Vals<'t> {
         self.probe_fuel = 0;
         self.probe_escalate = 0;
         self.probe_aborted = false;
+        self.wrap_count = 0;
     }
 
     #[inline]
