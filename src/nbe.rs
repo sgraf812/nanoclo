@@ -107,8 +107,8 @@ pub(crate) struct SpineNode<'t> {
 /// The arenas, the tables that give equal constructions equal indices, and
 /// the memos over them.
 pub(crate) struct Vals<'t> {
-    pub(crate) vals: Vec<Value<'t>>,
-    pub(crate) spines: Vec<SpineNode<'t>>,
+    pub(crate) vals: crate::arena::Arena<Value<'t>>,
+    pub(crate) spines: crate::arena::Arena<SpineNode<'t>>,
 
     // ---- interning ----
     /// `(parent, elimination) -> spine`
@@ -195,18 +195,22 @@ impl<'t> Vals<'t> {
             FxHashMap::with_capacity_and_hasher(PRE, Default::default())
         }
         Vals {
-            vals: Vec::with_capacity(PRE),
+            vals: crate::arena::Arena::new(),
             // index 0 of each of these arenas is the empty case, so that
             // VENV_NIL and SPINE_EMPTY are valid indices needing no special
             // casing on the lookup paths.
-            spines: vec![SpineNode {
-                elim: Elim::Proj {
-                    ty_name: crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0),
-                    idx: 0,
-                },
-                parent: 0,
-                len: 0,
-            }],
+            spines: {
+                let mut s = crate::arena::Arena::new();
+                s.push(SpineNode {
+                    elim: Elim::Proj {
+                        ty_name: crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0),
+                        idx: 0,
+                    },
+                    parent: 0,
+                    len: 0,
+                });
+                s
+            },
             spine_intern_app: pre(),
             spine_intern_proj: new_fx_hash_map(),
             rigid_intern: pre(),
@@ -243,7 +247,8 @@ impl<'t> Vals<'t> {
     }
 
     /// Drop everything: values name arena positions, so nothing survives a
-    /// declaration boundary. Capacity is kept where it is not extravagant.
+    /// declaration boundary. The arenas release their pages; a table keeps
+    /// its capacity where it is not extravagant.
     pub(crate) fn reset_decl(&mut self) {
         const CAP: usize = 1 << 16;
         fn rm<K: std::hash::Hash + Eq, V>(m: &mut FxHashMap<K, V>) {
@@ -260,14 +265,8 @@ impl<'t> Vals<'t> {
                 m.clear();
             }
         }
-        if self.vals.capacity() > (1 << 20) {
-            self.vals = Vec::new();
-            let sentinel = self.spines.remove(0);
-            self.spines = vec![sentinel];
-        } else {
-            self.vals.clear();
-            self.spines.truncate(1);
-        }
+        self.vals.truncate(0);
+        self.spines.truncate(1);
         rm(&mut self.spine_intern_app);
         rm(&mut self.spine_intern_proj);
         rm(&mut self.rigid_intern);

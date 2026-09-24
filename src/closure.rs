@@ -99,7 +99,7 @@ pub(crate) enum Uses {
 const MAX_USES_WORDS: usize = 8;
 
 pub(crate) struct CloState<'t> {
-    pub(crate) envs: Vec<EnvNode<'t>>,
+    pub(crate) envs: crate::arena::Arena<EnvNode<'t>>,
     /// keyed by `pack_entry_key(parent, entry)`
     pub(crate) env_intern: FxHashMap<(u64, u64), EnvId>,
 
@@ -181,7 +181,11 @@ pub fn ctrs_report() -> String {
 impl<'t> CloState<'t> {
     pub(crate) fn new() -> Self {
         CloState {
-            envs: vec![EnvNode { entry: Entry::Val(crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0), 0), parent: 0, len: 0, next_level: 0, jump: 0 }],
+            envs: {
+                let mut e = crate::arena::Arena::new();
+                e.push(EnvNode { entry: Entry::Val(crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0), 0), parent: 0, len: 0, next_level: 0, jump: 0 });
+                e
+            },
             env_intern: new_fx_hash_map(),
             infer_cache_check: new_fx_hash_map(),
             infer_cache_only: new_fx_hash_map(),
