@@ -29,6 +29,7 @@ mimalloc = { version = "0.1", default-features = false }
 indexmap = "2.13.0"
 rustc-hash = "2.1"
 hashbrown = "0.16"
+libc = "0.2"
 num-bigint = { version = "0.4.4", features = ["serde"] }
 num-integer = "0.1.46"
 num-traits = "0.2.17"

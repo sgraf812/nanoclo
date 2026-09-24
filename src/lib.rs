@@ -17,6 +17,7 @@ pub mod pretty_printer;
 pub mod quot;
 pub mod closure;
 pub(crate) mod nbe;
+pub(crate) mod arena;
 pub(crate) mod nbe_conv;
 pub(crate) mod nbe_eval;
 pub mod tc;
