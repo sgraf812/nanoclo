@@ -202,7 +202,7 @@ impl<'t> Vals<'t> {
             // casing on the lookup paths.
             spines: {
                 let mut s = crate::arena::Arena::new();
-                rc::counts().spines.push(1);
+                rc::new_sentinel(rc::Kind::Spine);
                 s.push(SpineNode {
                     elim: Elim::Proj {
                         ty_name: crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0),
@@ -300,9 +300,8 @@ impl<'t> Vals<'t> {
         // the caches above held references; the nodes go only after them
         self.vals.truncate(0);
         self.spines.truncate(1);
-        rc::counts().vals.truncate(0);
-        rc::counts().spines.truncate(1);
-        rc::counts().spines[0] = 1;
+        rc::reset(rc::Kind::Val, 0);
+        rc::reset(rc::Kind::Spine, 1);
     }
 
     #[inline]
@@ -327,7 +326,7 @@ impl<'t> Vals<'t> {
             Value::Sort { .. } | Value::NatLit { .. } | Value::StrLit { .. } => {}
         }
         vals.push(v);
-        rc::counts().vals.push(0);
+        rc::new_node(rc::Kind::Val);
         id
     }
 
@@ -340,7 +339,7 @@ impl<'t> Vals<'t> {
             rc::inc_val(a);
         }
         spines.push(SpineNode { elim, parent, len });
-        rc::counts().spines.push(0);
+        rc::new_node(rc::Kind::Spine);
         id
     }
 
@@ -351,12 +350,14 @@ impl<'t> Vals<'t> {
     pub(crate) fn spine_snoc(&mut self, parent: SpineId, elim: Elim<'t>) -> S {
         let Vals { spines, spine_intern_app, spine_intern_proj, .. } = self;
         let id = match elim {
-            Elim::App(a) => *spine_intern_app
-                .entry((parent, a))
-                .or_insert_with(|| Self::alloc_spine(spines, parent, elim)),
-            Elim::Proj { ty_name, idx } => *spine_intern_proj
-                .entry((parent, ty_name, idx))
-                .or_insert_with(|| Self::alloc_spine(spines, parent, elim)),
+            Elim::App(a) => rc::intern(spine_intern_app, rc::Kind::Spine, (parent, a), || {
+                Self::alloc_spine(spines, parent, elim)
+            }),
+            Elim::Proj { ty_name, idx } => {
+                rc::intern(spine_intern_proj, rc::Kind::Spine, (parent, ty_name, idx), || {
+                    Self::alloc_spine(spines, parent, elim)
+                })
+            }
         };
         S::own(id)
     }
@@ -411,9 +412,7 @@ impl<'t> Vals<'t> {
 
     pub(crate) fn mk_rigid(&mut self, head: RigidHead<'t>, spine: SpineId) -> V {
         let Vals { vals, rigid_intern, .. } = self;
-        let id = *rigid_intern
-            .entry((head, spine))
-            .or_insert_with(|| Self::alloc(vals, Value::Rigid { head, spine }));
+        let id = rc::intern(rigid_intern, rc::Kind::Val, (head, spine), || Self::alloc(vals, Value::Rigid { head, spine }));
         V::own(id)
     }
 
@@ -431,9 +430,7 @@ impl<'t> Vals<'t> {
         spine: SpineId,
     ) -> V {
         let Vals { vals, unfold_intern, .. } = self;
-        let id = *unfold_intern
-            .entry((name, levels, spine))
-            .or_insert_with(|| Self::alloc(vals, Value::Unfold { name, levels, spine, forced: None }));
+        let id = rc::intern(unfold_intern, rc::Kind::Val, (name, levels, spine), || Self::alloc(vals, Value::Unfold { name, levels, spine, forced: None }));
         V::own(id)
     }
 
@@ -446,7 +443,7 @@ impl<'t> Vals<'t> {
         body: ExprPtr<'t>,
     ) -> V {
         let Vals { vals, lam_intern, .. } = self;
-        let id = *lam_intern.entry((binder_type, env, body)).or_insert_with(|| {
+        let id = rc::intern(lam_intern, rc::Kind::Val, (binder_type, env, body), || {
             Self::alloc(
                 vals,
                 Value::Lam { binder_name, binder_style, binder_type, domain: None, env, body },
@@ -464,25 +461,23 @@ impl<'t> Vals<'t> {
         body: ExprPtr<'t>,
     ) -> V {
         let Vals { vals, pi_intern, .. } = self;
-        let id = *pi_intern
-            .entry((domain, env, body))
-            .or_insert_with(|| Self::alloc(vals, Value::Pi { binder_name, binder_style, domain, env, body }));
+        let id = rc::intern(pi_intern, rc::Kind::Val, (domain, env, body), || Self::alloc(vals, Value::Pi { binder_name, binder_style, domain, env, body }));
         V::own(id)
     }
 
     pub(crate) fn mk_sort(&mut self, level: LevelPtr<'t>) -> V {
         let Vals { vals, sort_intern, .. } = self;
-        V::own(*sort_intern.entry(level).or_insert_with(|| Self::alloc(vals, Value::Sort { level })))
+        V::own(rc::intern(sort_intern, rc::Kind::Val, level, || Self::alloc(vals, Value::Sort { level })))
     }
 
     pub(crate) fn mk_nat(&mut self, ptr: BigUintPtr<'t>) -> V {
         let Vals { vals, nat_intern, .. } = self;
-        V::own(*nat_intern.entry(ptr).or_insert_with(|| Self::alloc(vals, Value::NatLit { ptr })))
+        V::own(rc::intern(nat_intern, rc::Kind::Val, ptr, || Self::alloc(vals, Value::NatLit { ptr })))
     }
 
     pub(crate) fn mk_str(&mut self, ptr: StringPtr<'t>) -> V {
         let Vals { vals, str_intern, .. } = self;
-        V::own(*str_intern.entry(ptr).or_insert_with(|| Self::alloc(vals, Value::StrLit { ptr })))
+        V::own(rc::intern(str_intern, rc::Kind::Val, ptr, || Self::alloc(vals, Value::StrLit { ptr })))
     }
 
     /// A thunk interned under `key_env`, the environment projected onto the
@@ -496,9 +491,7 @@ impl<'t> Vals<'t> {
         expr: ExprPtr<'t>,
     ) -> V {
         let Vals { vals, thunk_intern, .. } = self;
-        let id = *thunk_intern
-            .entry((key_env, expr))
-            .or_insert_with(|| Self::alloc(vals, Value::Thunk { env, expr, forced: None }));
+        let id = rc::intern(thunk_intern, rc::Kind::Val, (key_env, expr), || Self::alloc(vals, Value::Thunk { env, expr, forced: None }));
         V::own(id)
     }
 

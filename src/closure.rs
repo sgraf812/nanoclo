@@ -194,7 +194,7 @@ impl<'t> CloState<'t> {
         CloState {
             envs: {
                 let mut e = crate::arena::Arena::new();
-                crate::rc::counts().envs.push(1);
+                crate::rc::new_sentinel(crate::rc::Kind::Env);
                 e.push(EnvNode { entry: Entry::Val(crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0), 0), parent: 0, len: 0, next_level: 0, jump: 0 });
                 e
             },
@@ -243,9 +243,7 @@ impl<'t> CloState<'t> {
             }
         }
         self.envs.truncate(1);
-        crate::rc::counts().envs.truncate(1);
-        crate::rc::counts().envs[0] = 1;
-        crate::rc::PINS.with(|p| p.set(0));
+        crate::rc::reset(crate::rc::Kind::Env, 1);
         rm(&mut self.env_intern);
         rm(&mut self.infer_cache_check);
         rm(&mut self.infer_cache_only);
@@ -377,9 +375,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.ctx.rp.ctrs[10] += 1;
         let key = pack_entry_key(env, Entry::V(v));
         let crate::closure::CloState { envs, env_intern, .. } = &mut self.ctx.rp;
-        let id = match env_intern.entry(key) {
-            std::collections::hash_map::Entry::Occupied(o) => *o.get(),
-            std::collections::hash_map::Entry::Vacant(slot) => {
+        let id = crate::rc::intern(env_intern, crate::rc::Kind::Env, key, || {
                 let p = &envs[env as usize];
                 let len = p.len + 1;
                 let next_level = p.next_level;
@@ -393,11 +389,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 debug_assert!(id < VIEW_BIT);
                 hold_entry(env, Entry::V(v));
                 envs.push(EnvNode { entry: Entry::V(v), parent: env, len, next_level, jump });
-                crate::rc::counts().envs.push(0);
-                slot.insert(id);
+                crate::rc::new_node(crate::rc::Kind::Env);
                 id
-            }
-        };
+        });
         crate::rc::E::own(id)
     }
 
@@ -421,8 +415,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         // The closure checker holds its environments without counting them,
         // so each one it receives is pinned for the rest of the declaration.
         if let Some(&id) = self.ctx.rp.env_intern.get(&key) {
-            crate::rc::pin_env(id);
-            return id;
+            if crate::rc::alive(crate::rc::Kind::Env, id) {
+                crate::rc::pin_env(id);
+                return id;
+            }
         }
         let len = self.env_len(env) + 1;
         let next_level = {
@@ -450,8 +446,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         debug_assert!(id < VIEW_BIT);
         hold_entry(env, entry);
         self.ctx.rp.envs.push(EnvNode { entry, parent: env, len, next_level, jump });
-        crate::rc::counts().envs.push(0);
+        crate::rc::new_node(crate::rc::Kind::Env);
         crate::rc::pin_env(id);
+        crate::rc::make_room(&mut self.ctx.rp.env_intern, |_, e| crate::rc::alive(crate::rc::Kind::Env, *e));
         self.ctx.rp.env_intern.insert(key, id);
         id
     }

@@ -17,7 +17,7 @@
 use crate::tc::SPEC_BUDGET;
 use crate::env::{Declar, ReducibilityHint};
 use crate::nbe::{ConstKind, Elim, RigidHead, SpineId, ValId, Value};
-use crate::rc::V;
+use crate::rc::{self, Kind, V};
 use crate::tc::TypeChecker;
 use crate::util::NamePtr;
 
@@ -105,12 +105,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if self.ctx.nb.probe_aborted {
             return r;
         }
+        let live = |&(a, b): &(ValId, ValId)| rc::alive(Kind::Val, a) && rc::alive(Kind::Val, b);
         if r {
+            rc::make_room_set(&mut self.ctx.nb.conv_pos, live);
             self.ctx.nb.conv_pos.insert(key);
         } else if RIGID && neg_eligible {
             if self.ctx.nb.probe_depth == 0 {
+                rc::make_room_set(&mut self.ctx.nb.conv_neg, live);
                 self.ctx.nb.conv_neg.insert(key);
             } else {
+                rc::make_room_set(&mut self.ctx.nb.conv_neg_probe, live);
                 self.ctx.nb.conv_neg_probe.insert(key);
             }
         }
@@ -396,12 +400,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             if self.ctx.nb.probe_aborted {
                 self.ctx.nb.probe_aborted = false;
                 self.ctx.rp.ctrs[24] += 1;
+                rc::make_room_set(&mut self.ctx.nb.probe_fail, |&(a, b)| {
+                    rc::alive(Kind::Spine, a) && rc::alive(Kind::Spine, b)
+                });
                 self.ctx.nb.probe_fail.insert(key);
                 const ESCALATE_CAP: u64 = 1 << 20;
                 self.ctx.nb.probe_escalate = (granted * 2).min(ESCALATE_CAP);
                 return false;
             }
             if !r {
+                rc::make_room_set(&mut self.ctx.nb.probe_fail, |&(a, b)| {
+                    rc::alive(Kind::Spine, a) && rc::alive(Kind::Spine, b)
+                });
                 self.ctx.nb.probe_fail.insert(key);
             }
         }

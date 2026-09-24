@@ -16,7 +16,12 @@ use crate::expr::Expr;
 use crate::nbe::{
     ConstKind, Elim, RigidHead, SpineId, ValId, VEnvId, Value, SPINE_EMPTY, VENV_NIL,
 };
-use crate::rc::{S, V};
+use crate::rc::{self, Kind, S, V};
+
+/// Whether a memo entry from value `k` to `r` names only live values.
+fn live_pair(k: ValId, r: Option<ValId>) -> bool {
+    rc::alive(Kind::Val, k) && r.is_none_or(|r| rc::alive(Kind::Val, r))
+}
 use crate::tc::TypeChecker;
 use crate::util::{
     nat_div, nat_gcd, nat_land, nat_lor, nat_mod, nat_shl, nat_shr, nat_sub, nat_xor, BigUintPtr,
@@ -53,6 +58,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// and an unfolded constant through its `Unfold` node, so the sharing an
     /// evaluation memo would buy already lives in the values themselves.
     pub(crate) fn nb_eval(&mut self, depth: u32, env: VEnvId, e: ExprPtr<'t>) -> V {
+        if rc::collect_due() {
+            self.nb_collect();
+        }
         let n = self.ctx.read_expr(e);
         let env = if n.num_loose_bvars() == 0 { VENV_NIL } else { env };
         match n {
@@ -507,9 +515,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// or report it stuck. Both answers are recorded on `v`.
     pub(crate) fn nb_iota(&mut self, depth: u32, v: ValId) -> Option<V> {
         if let Some(&r) = self.ctx.nb.iota_cache.get(&v) {
-            return r.map(V::own);
+            if r.is_none_or(|r| rc::alive(Kind::Val, r)) {
+                return r.map(V::own);
+            }
         }
         let r = self.nb_iota_go(depth, v);
+        rc::make_room(&mut self.ctx.nb.iota_cache, |&k, r| live_pair(k, *r));
         self.ctx.nb.iota_cache.insert(v, r.as_ref().map(V::id));
         r
     }
@@ -784,10 +795,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return None;
         }
         if let Some(&r) = self.ctx.nb.struct_eta_cache.get(&(major, rec_induct)) {
-            return r.map(V::own);
+            if r.is_none_or(|r| rc::alive(Kind::Val, r)) {
+                return r.map(V::own);
+            }
         }
         let np = usize::from(rec.num_params);
         let r = self.nb_struct_eta_go(depth, major, rec_induct, np);
+        rc::make_room(&mut self.ctx.nb.struct_eta_cache, |&(k, _), r| live_pair(k, *r));
         self.ctx.nb.struct_eta_cache.insert((major, rec_induct), r.as_ref().map(V::id));
         r
     }
@@ -1040,6 +1054,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             Value::Lam { .. } | Value::Pi { .. } => false,
             Value::Thunk { .. } => unreachable!("nb_is_open: thunk after forcing"),
         };
+        rc::make_room(&mut self.ctx.nb.open_cache, |&k, _| rc::alive(Kind::Val, k));
         self.ctx.nb.open_cache.insert(v.id(), r);
         r
     }
@@ -1106,9 +1121,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub(crate) fn nb_type(&mut self, depth: u32, v: ValId) -> V {
         let v = self.nb_force(depth, v);
         if let Some(&t) = self.ctx.nb.type_cache.get(&v.id()) {
-            return V::own(t);
+            if rc::alive(Kind::Val, t) {
+                return V::own(t);
+            }
         }
         let t = self.nb_type_go(depth, v.id());
+        rc::make_room(&mut self.ctx.nb.type_cache, |&k, t| live_pair(k, Some(*t)));
         self.ctx.nb.type_cache.insert(v.id(), t.id());
         t
     }
