@@ -115,6 +115,13 @@ impl<T> Arena<T> {
         self.released[b] = true;
     }
 
+    /// The id ranges of the blocks still present.
+    pub(crate) fn present_ranges(&self) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+        (0..self.released.len())
+            .filter(|&b| !self.released[b])
+            .map(|b| b * BLOCK..((b + 1) * BLOCK).min(self.len))
+    }
+
     /// Whether node `i` still has its block.
     #[inline]
     pub(crate) fn present(&self, i: usize) -> bool { i < self.len && !self.released[i >> BLOCK_BITS] }

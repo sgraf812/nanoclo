@@ -515,12 +515,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// or report it stuck. Both answers are recorded on `v`.
     pub(crate) fn nb_iota(&mut self, depth: u32, v: ValId) -> Option<V> {
         if let Some(&r) = self.ctx.nb.iota_cache.get(&v) {
-            if r.is_none_or(|r| rc::alive(Kind::Val, r)) {
-                return r.map(V::own);
-            }
+            return r.map(V::own);
         }
         let r = self.nb_iota_go(depth, v);
-        rc::make_room(&mut self.ctx.nb.iota_cache, |&k, r| live_pair(k, *r));
+        // the entry is an edge from `v`, like a forced cell, and goes with it
+        if let Some(x) = r.as_ref().filter(|x| x.id() != v) {
+            rc::inc_val(x.id());
+        }
         self.ctx.nb.iota_cache.insert(v, r.as_ref().map(V::id));
         r
     }
@@ -1121,12 +1122,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub(crate) fn nb_type(&mut self, depth: u32, v: ValId) -> V {
         let v = self.nb_force(depth, v);
         if let Some(&t) = self.ctx.nb.type_cache.get(&v.id()) {
-            if rc::alive(Kind::Val, t) {
-                return V::own(t);
-            }
+            return V::own(t);
         }
         let t = self.nb_type_go(depth, v.id());
-        rc::make_room(&mut self.ctx.nb.type_cache, |&k, t| live_pair(k, Some(*t)));
+        // an edge from `v`, which goes with it
+        if t.id() != v.id() {
+            rc::inc_val(t.id());
+        }
         self.ctx.nb.type_cache.insert(v.id(), t.id());
         t
     }

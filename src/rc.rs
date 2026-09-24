@@ -7,16 +7,16 @@
 //! reference, taken by `own` and given back when it drops.
 //!
 //! A node whose count a handle brings to zero is not freed at once: it
-//! becomes a zombie and enters the ring, and an intern hit on it makes it
-//! live again. `nb_collect` frees the zombies that have been in the ring for
-//! `RING` deaths. Freeing a node releases its children; a child whose count
-//! that brings to zero is freed as well, unless a handle released it within
-//! the last `RING` deaths, in which case it becomes a zombie of its own.
+//! becomes a zombie, and an intern hit on it makes it live again. Each count
+//! shares a 32-bit word with a stamp, `ALLOC | stamp << 12 | count`, where the
+//! stamp is the epoch of the node's last release by a handle. `nb_collect`
+//! starts a new epoch and sweeps the count words: it frees every zombie
+//! released before the previous epoch, and releases the children of each.
+//! A child that this leaves without holders is freed as well, unless a
+//! handle released it in the current or the previous epoch.
 //!
-//! Each count shares a 32-bit word with a stamp: `ALLOC | stamp << 12 | count`.
 //! The count saturates at `COUNT_MAX`, and a saturated node lives until the
-//! end of the declaration. The stamp is the ring clock at the node's last
-//! release by a handle. A word of zero marks a slot with no node.
+//! end of the declaration. A word of zero marks a slot with no node.
 //!
 //! The counts live apart from the nodes, in a store that only this module
 //! touches, so a handle can update its count while the evaluator holds the
@@ -25,19 +25,14 @@
 
 use crate::arena::Arena;
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
 
 const ALLOC: u32 = 1 << 31;
 const COUNT_BITS: u32 = 12;
 const COUNT_MAX: u32 = (1 << COUNT_BITS) - 1;
 const STAMP_BITS: u32 = 19;
 const STAMP_MASK: u32 = (1 << STAMP_BITS) - 1;
-/// Deaths a zombie waits in the ring before it is freed.
-/// TEMP experiment: `NANOCLO_RING` sets it as a power of two.
-fn ring_cap() -> usize {
-    static R: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *R.get_or_init(|| 1usize << std::env::var("NANOCLO_RING").ok().and_then(|s| s.parse::<u32>().ok()).unwrap_or(18))
-}
+/// Fewest allocations between two sweeps.
+const SWEEP_MIN: u64 = 1 << 20;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Kind {
@@ -50,10 +45,11 @@ pub(crate) struct Counts {
     pub(crate) vals: Arena<u32>,
     pub(crate) spines: Arena<u32>,
     pub(crate) envs: Arena<u32>,
-    /// Zombies in order of death, with their stamps.
-    ring: VecDeque<(Kind, u32, u32)>,
-    /// Deaths so far, modulo `2^STAMP_BITS`.
-    clock: u32,
+    /// Sweeps so far, modulo `2^STAMP_BITS`.
+    epoch: u32,
+    /// Allocations since the last sweep, and how many the next one waits for.
+    allocs: u64,
+    next_sweep: u64,
 }
 
 impl Counts {
@@ -84,8 +80,9 @@ impl CountsGuard {
             vals: Arena::new(),
             spines: Arena::new(),
             envs: Arena::new(),
-            ring: VecDeque::new(),
-            clock: 0,
+            epoch: 0,
+            allocs: 0,
+            next_sweep: SWEEP_MIN,
         });
         CURRENT.with(|cur| cur.set(&mut *c));
         STORES.with(|s| s.borrow_mut().push(c));
@@ -168,21 +165,26 @@ fn word(count: u32) -> u32 { ALLOC | count }
 
 /// Record a new node of kind `k`, with no holders yet.
 #[inline]
-pub(crate) fn new_node(k: Kind) { counts().of(k).push(word(0)) }
+pub(crate) fn new_node(k: Kind) {
+    let c = counts();
+    c.allocs += 1;
+    c.of(k).push(word(0))
+}
 
 /// Record a sentinel of kind `k`, held for as long as the context lives.
 pub(crate) fn new_sentinel(k: Kind) { counts().of(k).push(word(1)) }
 
 /// Forget every node of kind `k` past the first `n`, which are sentinels, and
-/// the ring and pins with them.
+/// the epochs and pins with them.
 pub(crate) fn reset(k: Kind, n: usize) {
     let c = counts();
     c.of(k).truncate(n);
     for i in 0..n {
         c.of(k)[i] = word(1);
     }
-    c.ring.clear();
-    c.clock = 0;
+    c.epoch = 0;
+    c.allocs = 0;
+    c.next_sweep = SWEEP_MIN;
     PINS.with(|p| p.set(0));
 }
 
@@ -208,18 +210,14 @@ pub(crate) fn inc(k: Kind, id: u32) {
 #[inline]
 pub(crate) fn release(k: Kind, id: u32) {
     let c = counts();
-    let clock = c.clock;
+    let epoch = c.epoch;
     let w = &mut c.of(k)[id as usize];
     let count = *w & COUNT_MAX;
     if count == COUNT_MAX {
         return;
     }
     assert!(count > 0 && *w & ALLOC != 0, "{k:?} {id}: release without a reference");
-    *w = ALLOC | clock << COUNT_BITS | (count - 1);
-    if count == 1 {
-        c.ring.push_back((k, id, clock));
-        c.clock = (clock + 1) & STAMP_MASK;
-    }
+    *w = ALLOC | epoch << COUNT_BITS | (count - 1);
 }
 
 /// Give back the reference a freed node held on `id`. Returns the stamp when
@@ -255,23 +253,42 @@ pub(crate) fn pin_env(id: u32) {
 #[inline]
 pub(crate) fn dec_val(id: u32) { release(Kind::Val, id) }
 
-/// Whether the ring holds zombies that are due.
+/// Whether enough has been allocated since the last sweep.
 #[inline]
-pub(crate) fn collect_due() -> bool { counts().ring.len() > ring_cap() }
+pub(crate) fn collect_due() -> bool {
+    let c = counts();
+    c.allocs >= c.next_sweep
+}
 
 impl<'x, 't: 'x, 'p: 't> crate::tc::TypeChecker<'x, 't, 'p> {
-    /// Free the zombies that have waited `RING` deaths, and every node that
-    /// freeing them leaves without holders and without a recent release.
+    /// Start a new epoch and free every zombie released before the previous
+    /// one, and every node that freeing them leaves without holders and
+    /// without a release in the current or the previous epoch.
     pub(crate) fn nb_collect(&mut self) {
         use crate::closure::{Entry, VIEW_BIT};
         use crate::nbe::{Elim, RigidHead, Value};
         let c = counts();
+        c.epoch = (c.epoch + 1) & STAMP_MASK;
+        c.allocs = 0;
+        let epoch = c.epoch;
+        let stale = |stamp: u32| (epoch.wrapping_sub(stamp) & STAMP_MASK) >= 2;
         let mut work: Vec<(Kind, u32)> = Vec::new();
         let mut children: Vec<(Kind, u32)> = Vec::new();
-        while c.ring.len() > ring_cap() {
-            let (k, id, stamp) = c.ring.pop_front().unwrap();
+        let mut zombies: Vec<(Kind, u32)> = Vec::new();
+        for k in [Kind::Val, Kind::Spine, Kind::Env] {
             let a = c.of(k);
-            if !a.present(id as usize) || a[id as usize] != (ALLOC | stamp << COUNT_BITS) {
+            for range in a.present_ranges().collect::<Vec<_>>() {
+                for i in range {
+                    let w = a[i];
+                    if w & ALLOC != 0 && w & COUNT_MAX == 0 && stale((w >> COUNT_BITS) & STAMP_MASK) {
+                        zombies.push((k, i as u32));
+                    }
+                }
+            }
+        }
+        for (k, id) in zombies {
+            // an earlier cascade in this sweep may have freed it already
+            if !alive(k, id) || c.of(k)[id as usize] & COUNT_MAX != 0 {
                 continue;
             }
             work.push((k, id));
@@ -320,6 +337,19 @@ impl<'x, 't: 'x, 'p: 't> crate::tc::TypeChecker<'x, 't, 'p> {
                         }
                     }
                 }
+                if k == Kind::Val {
+                    // the reduct and the type recorded for it are its children too
+                    if let Some(Some(r)) = self.ctx.nb.iota_cache.remove(&id) {
+                        if r != id {
+                            children.push((Kind::Val, r));
+                        }
+                    }
+                    if let Some(t) = self.ctx.nb.type_cache.remove(&id) {
+                        if t != id {
+                            children.push((Kind::Val, t));
+                        }
+                    }
+                }
                 c.of(k)[id as usize] = 0;
                 c.of(k).free(id as usize);
                 match k {
@@ -329,14 +359,19 @@ impl<'x, 't: 'x, 'p: 't> crate::tc::TypeChecker<'x, 't, 'p> {
                 }
                 for &(ck, cid) in &children {
                     let Some(stamp) = drop_child(c, ck, cid) else { continue };
-                    if (c.clock.wrapping_sub(stamp) & STAMP_MASK) < ring_cap() as u32 {
-                        c.ring.push_back((ck, cid, stamp));
-                    } else {
+                    if stale(stamp) {
                         work.push((ck, cid));
                     }
                 }
             }
         }
+        // the next sweep waits for as many allocations as half the slots
+        // still present, so that scanning stays in proportion to allocating
+        let present: usize = [Kind::Val, Kind::Spine, Kind::Env]
+            .into_iter()
+            .map(|k| c.of(k).present_ranges().map(|r| r.len()).sum::<usize>())
+            .sum();
+        c.next_sweep = SWEEP_MIN.max(present as u64 / 2);
     }
 }
 
@@ -405,6 +440,16 @@ impl<'t, 'p> crate::util::TcCtx<'t, 'p> {
             }
         }
         let nb = &self.nb;
+        for (&k, &r) in &nb.iota_cache {
+            if let Some(r) = r.filter(|&r| r != k && live(&c.vals, k as usize)) {
+                ev[r as usize] += 1;
+            }
+        }
+        for (&k, &t) in &nb.type_cache {
+            if t != k && live(&c.vals, k as usize) {
+                ev[t as usize] += 1;
+            }
+        }
         for v in nb.clo_val_cache.values().chain(nb.const_val_cache.values()).chain(nb.const_ty_cache.values())
             .chain(nb.rec_rule_cache.values()).chain(nb.local_cache.values()).chain(nb.unfold_cache.values().flatten())
         {
