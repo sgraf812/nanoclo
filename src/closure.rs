@@ -352,31 +352,25 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.max_level(e).max(self.env_next_level(env))
     }
 
-    /// Extend an environment with an evaluated entry. Everything the new
-    /// node holds comes from the parent node, so a miss costs one probe.
+    /// Extend an environment with an evaluated entry. Each call makes a new
+    /// node, so two equal extensions have different ids; the caches keyed on
+    /// environments see them through their read sets, where they coincide.
     pub(crate) fn push_entry_v(&mut self, env: EnvId, v: crate::nbe::ValId) -> EnvId {
         self.ctx.rp.ctrs[10] += 1;
-        let key = pack_entry_key(env, Entry::V(v));
-        let crate::closure::CloState { envs, env_intern, .. } = &mut self.ctx.rp;
-        match env_intern.entry(key) {
-            std::collections::hash_map::Entry::Occupied(o) => *o.get(),
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                let p = &envs[env as usize];
-                let len = p.len + 1;
-                let next_level = p.next_level;
-                let jump = {
-                    let d1 = p.len - envs[p.jump as usize].len;
-                    let j = &envs[p.jump as usize];
-                    let d2 = j.len - envs[j.jump as usize].len;
-                    if d1 == d2 { j.jump } else { env }
-                };
-                let id = u32::try_from(envs.len()).unwrap();
-                debug_assert!(id < VIEW_BIT);
-                envs.push(EnvNode { entry: Entry::V(v), parent: env, len, next_level, jump });
-                slot.insert(id);
-                id
-            }
-        }
+        let envs = &mut self.ctx.rp.envs;
+        let p = &envs[env as usize];
+        let len = p.len + 1;
+        let next_level = p.next_level;
+        let jump = {
+            let d1 = p.len - envs[p.jump as usize].len;
+            let j = &envs[p.jump as usize];
+            let d2 = j.len - envs[j.jump as usize].len;
+            if d1 == d2 { j.jump } else { env }
+        };
+        let id = u32::try_from(envs.len()).unwrap();
+        debug_assert!(id < VIEW_BIT);
+        envs.push(EnvNode { entry: Entry::V(v), parent: env, len, next_level, jump });
+        id
     }
 
     pub(crate) fn push_entry(&mut self, env: EnvId, entry: Entry<'t>) -> EnvId {
