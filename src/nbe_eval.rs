@@ -16,6 +16,7 @@ use crate::expr::Expr;
 use crate::nbe::{
     ConstKind, Elim, RigidHead, SpineId, ValId, VEnvId, Value, SPINE_EMPTY, VENV_NIL,
 };
+use crate::rc::{S, V};
 use crate::tc::TypeChecker;
 use crate::util::{
     nat_div, nat_gcd, nat_land, nat_lor, nat_mod, nat_shl, nat_shr, nat_sub, nat_xor, BigUintPtr,
@@ -51,14 +52,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// value, a delayed argument evaluates through its thunk's forced cell,
     /// and an unfolded constant through its `Unfold` node, so the sharing an
     /// evaluation memo would buy already lives in the values themselves.
-    pub(crate) fn nb_eval(&mut self, depth: u32, env: VEnvId, e: ExprPtr<'t>) -> ValId {
+    pub(crate) fn nb_eval(&mut self, depth: u32, env: VEnvId, e: ExprPtr<'t>) -> V {
         let n = self.ctx.read_expr(e);
         let env = if n.num_loose_bvars() == 0 { VENV_NIL } else { env };
         match n {
             Var { dbj_idx, .. } => {
                 let entry = self.lookup(env, dbj_idx);
                 let v = self.entry_val(entry);
-                self.nb_force(depth, v)
+                self.nb_force(depth, v.id())
             }
             Sort { level, .. } => {
                 let level = self.ctx.simplify(level);
@@ -81,7 +82,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let mut f = self.nb_eval(depth, env, cursor);
                 let mut i = args.len();
                 while i > 0 {
-                    let batchable = match self.ctx.nb.get(f) {
+                    let batchable = match self.ctx.nb.get(f.id()) {
                         Value::Rigid { head, .. } => !matches!(
                             head,
                             RigidHead::Const(ConstKind::Ctor, name, _)
@@ -94,27 +95,28 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         _ => false,
                     };
                     if batchable {
-                        let (head_rigid, mut spine) = match self.ctx.nb.get(f) {
+                        let (head_rigid, spine) = match self.ctx.nb.get(f.id()) {
                             Value::Rigid { head, spine } => (Ok(head), spine),
                             Value::Unfold { name, levels, spine, .. } => {
                                 (Err((name, levels)), spine)
                             }
                             _ => unreachable!(),
                         };
+                        let mut spine = S::own(spine);
                         while i > 0 {
                             i -= 1;
                             let a = self.nb_delay(depth, env, args[i]);
-                            spine = self.ctx.nb.spine_snoc(spine, Elim::App(a));
+                            spine = self.ctx.nb.spine_snoc(spine.id(), Elim::App(a.id()));
                         }
                         f = match head_rigid {
-                            Ok(head) => self.ctx.nb.mk_rigid(head, spine),
-                            Err((name, levels)) => self.ctx.nb.mk_unfold(name, levels, spine),
+                            Ok(head) => self.ctx.nb.mk_rigid(head, spine.id()),
+                            Err((name, levels)) => self.ctx.nb.mk_unfold(name, levels, spine.id()),
                         };
                         break;
                     }
                     i -= 1;
                     let a = self.nb_delay(depth, env, args[i]);
-                    f = self.nb_apply(depth, f, a);
+                    f = self.nb_apply(depth, f.id(), a.id());
                 }
                 f
             }
@@ -123,21 +125,26 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             Pi { binder_name, binder_style, binder_type, body, .. } => {
                 let domain = self.nb_delay(depth, env, binder_type);
-                self.ctx.nb.mk_pi(binder_name, binder_style, domain, env, body)
+                self.ctx.nb.mk_pi(binder_name, binder_style, domain.id(), env, body)
             }
             Let { .. } => {
+                let mut held = None;
                 let mut env = env;
                 let mut cursor = e;
                 while let Let { val, body, .. } = self.ctx.read_expr(cursor) {
                     let v = self.nb_eval(depth, env, val);
-                    env = self.push_entry_v(env, v);
+                    let env2 = self.push_entry_v(env, v.id());
+                    env = env2.id();
+                    held = Some(env2);
                     cursor = body;
                 }
-                self.nb_eval(depth, env, cursor)
+                let r = self.nb_eval(depth, env, cursor);
+                drop(held);
+                r
             }
             Proj { ty_name, idx, structure, .. } => {
                 let s = self.nb_eval(depth, env, structure);
-                self.nb_proj(depth, ty_name, idx, s)
+                self.nb_proj(depth, ty_name, idx, s.id())
             }
         }
     }
@@ -145,7 +152,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Record a subterm without evaluating it. Something already in normal
     /// form is evaluated straight away, since a thunk over it would cost more
     /// than the value.
-    fn nb_delay(&mut self, depth: u32, env: VEnvId, e: ExprPtr<'t>) -> ValId {
+    fn nb_delay(&mut self, depth: u32, env: VEnvId, e: ExprPtr<'t>) -> V {
         let n = self.ctx.read_expr(e);
         let env = if n.num_loose_bvars() == 0 { VENV_NIL } else { env };
         match n {
@@ -157,16 +164,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// A thunk for `e` under `env`, shared across environments agreeing on
     /// the entries `e` reads.
-    pub(crate) fn nb_thunk(&mut self, env: crate::nbe::VEnvId, e: ExprPtr<'t>) -> crate::nbe::ValId {
+    pub(crate) fn nb_thunk(&mut self, env: crate::nbe::VEnvId, e: ExprPtr<'t>) -> V {
         let key_env = self.read_key(e, env);
         self.ctx.nb.mk_thunk_keyed(key_env, env, e)
     }
 
     /// The value an environment entry stands for: an evaluated entry is
     /// itself, a delayed one becomes a thunk, an opened binder its neutral.
-    pub(crate) fn entry_val(&mut self, entry: crate::closure::Entry<'t>) -> crate::nbe::ValId {
+    pub(crate) fn entry_val(&mut self, entry: crate::closure::Entry<'t>) -> V {
         match entry {
-            crate::closure::Entry::V(v) => v,
+            crate::closure::Entry::V(v) => V::own(v),
             crate::closure::Entry::Val(e, env) => {
                 let env = if self.lbr(e) == 0 { crate::nbe::VENV_NIL } else { env };
                 self.nb_thunk(env, e)
@@ -175,20 +182,20 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    pub(crate) fn nb_local(&mut self, e: ExprPtr<'t>) -> ValId {
-        if let Some(&v) = self.ctx.nb.local_cache.get(&e) {
-            return v;
+    pub(crate) fn nb_local(&mut self, e: ExprPtr<'t>) -> V {
+        if let Some(v) = self.ctx.nb.local_cache.get(&e) {
+            return v.clone();
         }
         let v = self.ctx.nb.mk_rigid(RigidHead::Local(e), SPINE_EMPTY);
-        self.ctx.nb.local_cache.insert(e, v);
+        self.ctx.nb.local_cache.insert(e, v.clone());
         v
     }
 
     /// The value denoting a constant: one with a body stays folded, anything
     /// else is a neutral carrying the kind that decides how it reduces.
-    fn nb_const(&mut self, name: NamePtr<'t>, levels: LevelsPtr<'t>) -> ValId {
-        if let Some(&v) = self.ctx.nb.const_val_cache.get(&(name, levels)) {
-            return v;
+    fn nb_const(&mut self, name: NamePtr<'t>, levels: LevelsPtr<'t>) -> V {
+        if let Some(v) = self.ctx.nb.const_val_cache.get(&(name, levels)) {
+            return v.clone();
         }
         {
             // These two reduce by running compiled code, which a checker
@@ -215,32 +222,32 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             None => self.ctx.nb.mk_rigid(RigidHead::Const(ConstKind::Axiom, name, levels), SPINE_EMPTY),
         };
-        self.ctx.nb.const_val_cache.insert((name, levels), v);
+        self.ctx.nb.const_val_cache.insert((name, levels), v.clone());
         v
     }
 
     /// Force a thunk, remembering the result in it.
-    pub(crate) fn nb_force(&mut self, depth: u32, v: ValId) -> ValId {
+    pub(crate) fn nb_force(&mut self, depth: u32, v: ValId) -> V {
         match self.ctx.nb.get(v) {
             Value::Thunk { env, expr, forced } => {
                 if let Some(f) = forced {
-                    return f;
+                    return V::own(f);
                 }
                 let f = self.nb_eval(depth, env, expr);
-                let f = self.nb_force(depth, f);
-                self.ctx.nb.set_forced(v, f);
+                let f = self.nb_force(depth, f.id());
+                self.ctx.nb.set_forced(v, f.id());
                 f
             }
-            _ => v,
+            _ => V::own(v),
         }
     }
 
     /// Apply a value to an argument.
-    pub(crate) fn nb_apply(&mut self, depth: u32, f: ValId, a: ValId) -> ValId {
+    pub(crate) fn nb_apply(&mut self, depth: u32, f: ValId, a: ValId) -> V {
         match self.ctx.nb.get(f) {
             Value::Lam { env, body, .. } => {
                 let env2 = self.push_entry_v(env, a);
-                self.nb_eval(depth, env2, body)
+                self.nb_eval(depth, env2.id(), body)
             }
             Value::Rigid { head, spine } => {
                 let spine = self.ctx.nb.spine_snoc(spine, Elim::App(a));
@@ -255,24 +262,24 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         }
                     }
                 }
-                self.ctx.nb.mk_rigid(head, spine)
+                self.ctx.nb.mk_rigid(head, spine.id())
             }
             Value::Unfold { name, levels, spine, .. } => {
                 let spine = self.ctx.nb.spine_snoc(spine, Elim::App(a));
                 // A `Nat` primitive whose arguments are already literals is
                 // answered here, so the recursive definition never unfolds.
                 if self.nat_ext() && self.nb_is_nat_prim(name) {
-                    if let Some(args) = self.ctx.nb.spine_args(spine) {
+                    if let Some(args) = self.ctx.nb.spine_args(spine.id()) {
                         if let Some(r) = self.nb_nat_red(depth, name, &args, false) {
                             return r;
                         }
                     }
                 }
-                self.ctx.nb.mk_unfold(name, levels, spine)
+                self.ctx.nb.mk_unfold(name, levels, spine.id())
             }
             Value::Thunk { .. } => {
                 let f = self.nb_force(depth, f);
-                self.nb_apply(depth, f, a)
+                self.nb_apply(depth, f.id(), a)
             }
             _ => panic!("nb_apply: not a function"),
         }
@@ -285,9 +292,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         ty_name: NamePtr<'t>,
         idx: usize,
         s: ValId,
-    ) -> ValId {
+    ) -> V {
         let s = self.nb_whnf(depth, s);
-        match self.ctx.nb.get(s) {
+        match self.ctx.nb.get(s.id()) {
             Value::Rigid { head: RigidHead::Const(ConstKind::Ctor, ctor, _), spine } => {
                 if let Some(cd) = self.env.get_constructor(&ctor) {
                     if cd.inductive_name == ty_name {
@@ -297,17 +304,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         }
                     }
                 }
-                self.nb_proj_stuck(ty_name, idx, s)
+                self.nb_proj_stuck(ty_name, idx, s.id())
             }
             Value::NatLit { ptr } => {
                 let c = self.nb_nat_to_ctor(depth, ptr).expect("nb_proj: nat literal");
-                self.nb_proj(depth, ty_name, idx, c)
+                self.nb_proj(depth, ty_name, idx, c.id())
             }
             Value::StrLit { ptr } => {
                 let c = self.nb_str_to_ctor(depth, ptr).expect("nb_proj: string literal");
-                self.nb_proj(depth, ty_name, idx, c)
+                self.nb_proj(depth, ty_name, idx, c.id())
             }
-            Value::Rigid { .. } | Value::Unfold { .. } => self.nb_proj_stuck(ty_name, idx, s),
+            Value::Rigid { .. } | Value::Unfold { .. } => self.nb_proj_stuck(ty_name, idx, s.id()),
             other => panic!(
                 "nb_proj: not a structure: {} .{} of {}",
                 format!("{:?}", self.ctx.debug_print(ty_name)),
@@ -322,29 +329,29 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn nb_proj_stuck(&mut self, ty_name: NamePtr<'t>, idx: usize, s: ValId) -> ValId {
+    fn nb_proj_stuck(&mut self, ty_name: NamePtr<'t>, idx: usize, s: ValId) -> V {
         match self.ctx.nb.get(s) {
             Value::Rigid { head, spine } => {
                 let spine = self.ctx.nb.spine_snoc(spine, Elim::Proj { ty_name, idx });
-                self.ctx.nb.mk_rigid(head, spine)
+                self.ctx.nb.mk_rigid(head, spine.id())
             }
             Value::Unfold { name, levels, spine, .. } => {
                 let spine = self.ctx.nb.spine_snoc(spine, Elim::Proj { ty_name, idx });
-                self.ctx.nb.mk_unfold(name, levels, spine)
+                self.ctx.nb.mk_unfold(name, levels, spine.id())
             }
             _ => unreachable!("nb_proj_stuck: not neutral"),
         }
     }
 
     /// The domain of a lambda or pi, evaluated once.
-    pub(crate) fn nb_lam_domain(&mut self, depth: u32, v: ValId) -> ValId {
+    pub(crate) fn nb_lam_domain(&mut self, depth: u32, v: ValId) -> V {
         match self.ctx.nb.get(v) {
             Value::Lam { binder_type, domain, env, .. } => {
                 if let Some(d) = domain {
-                    return d;
+                    return V::own(d);
                 }
                 let d = self.nb_eval(depth, env, binder_type);
-                self.ctx.nb.set_domain(v, d);
+                self.ctx.nb.set_domain(v, d.id());
                 d
             }
             Value::Pi { domain, .. } => self.nb_force(depth, domain),
@@ -353,37 +360,36 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     /// Instantiate a binder's body at `a`.
-    pub(crate) fn nb_open(&mut self, depth: u32, binder: ValId, a: ValId) -> ValId {
+    pub(crate) fn nb_open(&mut self, depth: u32, binder: ValId, a: ValId) -> V {
         let (env, body) = match self.ctx.nb.get(binder) {
             Value::Lam { env, body, .. } | Value::Pi { env, body, .. } => (env, body),
             _ => panic!("nb_open: not a binder"),
         };
         let env2 = self.push_entry_v(env, a);
-        self.nb_eval(depth, env2, body)
+        self.nb_eval(depth, env2.id(), body)
     }
 
     // ---- reduction ----
 
     /// Weak head normal form: unfold constants and fire recursors until the
     /// head is stuck.
-    pub(crate) fn nb_whnf(&mut self, depth: u32, v: ValId) -> ValId {
+    pub(crate) fn nb_whnf(&mut self, depth: u32, v: ValId) -> V {
         stacker::maybe_grow(256 * 1024, 16 * 1024 * 1024, || {
-            let mut cur = v;
+            let mut cur = self.nb_force(depth, v);
             loop {
-                cur = self.nb_force(depth, cur);
-                match self.ctx.nb.get(cur) {
+                match self.ctx.nb.get(cur.id()) {
                     Value::Unfold { .. } => {
-                        let next = self.nb_unfold(depth, cur);
+                        let next = self.nb_unfold(depth, cur.id());
                         if next == cur {
                             return cur;
                         }
-                        cur = next;
+                        cur = self.nb_force(depth, next.id());
                     }
                     Value::Rigid { head: RigidHead::Const(k, ..), .. }
                         if matches!(k, ConstKind::Recursor | ConstKind::QuotConst) =>
                     {
-                        match self.nb_iota(depth, cur) {
-                            Some(next) => cur = next,
+                        match self.nb_iota(depth, cur.id()) {
+                            Some(next) => cur = self.nb_force(depth, next.id()),
                             None => return cur,
                         }
                     }
@@ -396,28 +402,28 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Unfold a folded constant application by evaluating the definition's
     /// body and replaying the spine on it. The result is recorded on the
     /// value, so the replay happens once.
-    pub(crate) fn nb_unfold(&mut self, depth: u32, v: ValId) -> ValId {
+    pub(crate) fn nb_unfold(&mut self, depth: u32, v: ValId) -> V {
         self.nb_unfold_go(depth, v, false)
     }
 
     /// Unfold even a `Nat` primitive that would rather stay folded. Used
     /// where conversion has nothing else left to try.
-    pub(crate) fn nb_unfold_demand(&mut self, depth: u32, v: ValId) -> ValId {
+    pub(crate) fn nb_unfold_demand(&mut self, depth: u32, v: ValId) -> V {
         let force = self.ctx.nb.probe_depth == 0;
         self.nb_unfold_go(depth, v, force)
     }
 
-    fn nb_unfold_go(&mut self, depth: u32, v: ValId, force: bool) -> ValId {
+    fn nb_unfold_go(&mut self, depth: u32, v: ValId, force: bool) -> V {
         let Value::Unfold { name, levels, spine, forced } = self.ctx.nb.get(v) else {
-            return v;
+            return V::own(v);
         };
         if let Some(f) = forced {
-            return f;
+            return V::own(f);
         }
         if self.nat_ext() && self.nb_is_nat_prim(name) {
             if let Some(args) = self.ctx.nb.spine_args(spine) {
                 if let Some(r) = self.nb_nat_red(depth, name, &args, true) {
-                    self.ctx.nb.set_forced(v, r);
+                    self.ctx.nb.set_forced(v, r.id());
                     return r;
                 }
                 // `Nat.add`, and its siblings, recurse on their second
@@ -425,7 +431,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 // literal walks that literal in unary, so the application
                 // stays folded until something demands otherwise.
                 if !force && self.nb_nat_defer(depth, name, &args) {
-                    return v;
+                    return V::own(v);
                 }
             }
         }
@@ -437,16 +443,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let Some(head) = self.nb_unfold_const(name, levels) else {
             self.ctx.nb.set_forced(v, v);
-            return v;
+            return V::own(v);
         };
         let mut cur = head;
         for elim in self.ctx.nb.spine_to_vec(spine) {
             cur = match elim {
-                Elim::App(a) => self.nb_apply(depth, cur, a),
-                Elim::Proj { ty_name, idx } => self.nb_proj(depth, ty_name, idx, cur),
+                Elim::App(a) => self.nb_apply(depth, cur.id(), a),
+                Elim::Proj { ty_name, idx } => self.nb_proj(depth, ty_name, idx, cur.id()),
             };
         }
-        self.ctx.nb.set_forced(v, cur);
+        self.ctx.nb.set_forced(v, cur.id());
         cur
     }
 
@@ -456,9 +462,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         &mut self,
         name: NamePtr<'t>,
         levels: LevelsPtr<'t>,
-    ) -> Option<ValId> {
-        if let Some(&v) = self.ctx.nb.unfold_cache.get(&(name, levels)) {
-            return v;
+    ) -> Option<V> {
+        if let Some(v) = self.ctx.nb.unfold_cache.get(&(name, levels)) {
+            return v.clone();
         }
         let r = (|| {
             let (uparams, val) = self.env.get_declar_val(&name)?;
@@ -493,22 +499,22 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             };
             Some(self.nb_eval(0, VENV_NIL, val))
         })();
-        self.ctx.nb.unfold_cache.insert((name, levels), r);
+        self.ctx.nb.unfold_cache.insert((name, levels), r.clone());
         r
     }
 
     /// Fire a recursor or a quotient eliminator standing at the head of `v`,
     /// or report it stuck. Both answers are recorded on `v`.
-    pub(crate) fn nb_iota(&mut self, depth: u32, v: ValId) -> Option<ValId> {
+    pub(crate) fn nb_iota(&mut self, depth: u32, v: ValId) -> Option<V> {
         if let Some(&r) = self.ctx.nb.iota_cache.get(&v) {
-            return r;
+            return r.map(V::own);
         }
         let r = self.nb_iota_go(depth, v);
-        self.ctx.nb.iota_cache.insert(v, r);
+        self.ctx.nb.iota_cache.insert(v, r.as_ref().map(V::id));
         r
     }
 
-    fn nb_iota_go(&mut self, depth: u32, v: ValId) -> Option<ValId> {
+    fn nb_iota_go(&mut self, depth: u32, v: ValId) -> Option<V> {
         let Value::Rigid { head: RigidHead::Const(kind, name, levels), spine } =
             self.ctx.nb.get(v)
         else {
@@ -531,7 +537,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     return Some(r);
                 }
                 let major = self.nb_whnf(depth, args[rec.major_idx()]);
-                self.nb_fire_recursor(depth, rec, levels, &args, major)
+                self.nb_fire_recursor(depth, rec, levels, &args, major.id())
             }
             ConstKind::QuotConst => {
                 let nc = self.ctx.export_file.name_cache;
@@ -543,7 +549,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     return None;
                 };
                 let major = self.nb_whnf(depth, *args.get(mk_pos)?);
-                self.nb_fire_quot(depth, name, &args, major)
+                self.nb_fire_quot(depth, name, &args, major.id())
             }
             _ => None,
         }
@@ -555,7 +561,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         name: NamePtr<'t>,
         args: &[ValId],
         major: ValId,
-    ) -> Option<ValId> {
+    ) -> Option<V> {
         let nc = self.ctx.export_file.name_cache;
         let rest_idx = if Some(name) == nc.quot_lift {
             6usize
@@ -579,7 +585,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let f = *args.get(3)?;
         let mut result = self.nb_apply(depth, f, mk_args[2]);
         for &a in &args[rest_idx..] {
-            result = self.nb_apply(depth, result, a);
+            result = self.nb_apply(depth, result.id(), a);
         }
         Some(result)
     }
@@ -591,7 +597,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         levels: LevelsPtr<'t>,
         args: &[ValId],
         major: ValId,
-    ) -> Option<ValId> {
+    ) -> Option<V> {
         // `Nat.rec` on a literal steps without expanding the literal into a
         // tower of `Nat.succ`.
         if self.nat_ext()
@@ -605,9 +611,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             .nb_major_to_ctor(depth, major)
             .or_else(|| self.nb_k_reduce(depth, major, rec))
             .or_else(|| self.nb_struct_eta_reduce(depth, major, rec))
-            .unwrap_or(major);
+            .unwrap_or_else(|| V::own(major));
         let Value::Rigid { head: RigidHead::Const(ConstKind::Ctor, ctor, _), spine } =
-            self.ctx.nb.get(major)
+            self.ctx.nb.get(major.id())
         else {
             return None;
         };
@@ -616,23 +622,23 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let nfields = usize::from(rule.ctor_telescope_size_wo_params);
         let num_extra = ctor_args.len().checked_sub(nfields)?;
         let mut result = match self.ctx.nb.rec_rule_cache.get(&(rule.val, levels)) {
-            Some(&v) => v,
+            Some(v) => v.clone(),
             None => {
                 let body = self.ctx.subst_expr_levels(rule.val, rec.info.uparams, levels);
                 let v = self.nb_eval(0, VENV_NIL, body);
-                self.ctx.nb.rec_rule_cache.insert((rule.val, levels), v);
+                self.ctx.nb.rec_rule_cache.insert((rule.val, levels), v.clone());
                 v
             }
         };
         let nprefix = usize::from(rec.num_params + rec.num_motives + rec.num_minors);
         for &a in &args[..nprefix] {
-            result = self.nb_apply(depth, result, a);
+            result = self.nb_apply(depth, result.id(), a);
         }
         for &a in &ctor_args[num_extra..] {
-            result = self.nb_apply(depth, result, a);
+            result = self.nb_apply(depth, result.id(), a);
         }
         for &a in &args[rec.major_idx() + 1..] {
-            result = self.nb_apply(depth, result, a);
+            result = self.nb_apply(depth, result.id(), a);
         }
         Some(result)
     }
@@ -646,13 +652,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         n_ptr: BigUintPtr<'t>,
         rec: &RecursorData<'t>,
         levels: LevelsPtr<'t>,
-    ) -> ValId {
+    ) -> V {
         let n = self.ctx.read_bignum(n_ptr).expect("nb_nat_rec: literal").clone();
         let nparams = usize::from(rec.num_params);
         let nmotives = usize::from(rec.num_motives);
         let major_idx = rec.major_idx();
         let mut result = if n.is_zero() {
-            args[nparams + nmotives]
+            V::own(args[nparams + nmotives])
         } else {
             let pred = self.ctx.alloc_bignum(n - 1u8).expect("nb_nat_rec: predecessor");
             let pred_val = self.ctx.nb.mk_nat(pred);
@@ -662,19 +668,19 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 SPINE_EMPTY,
             );
             for &a in &args[..major_idx] {
-                ih = self.nb_apply(depth, ih, a);
+                ih = self.nb_apply(depth, ih.id(), a);
             }
-            ih = self.nb_apply(depth, ih, pred_val);
-            let stepped = self.nb_apply(depth, succ_case, pred_val);
-            self.nb_apply(depth, stepped, ih)
+            ih = self.nb_apply(depth, ih.id(), pred_val.id());
+            let stepped = self.nb_apply(depth, succ_case.id(), pred_val.id());
+            self.nb_apply(depth, stepped.id(), ih.id())
         };
         for &a in &args[major_idx + 1..] {
-            result = self.nb_apply(depth, result, a);
+            result = self.nb_apply(depth, result.id(), a);
         }
         result
     }
 
-    fn nb_major_to_ctor(&mut self, depth: u32, major: ValId) -> Option<ValId> {
+    fn nb_major_to_ctor(&mut self, depth: u32, major: ValId) -> Option<V> {
         match self.ctx.nb.get(major) {
             Value::NatLit { ptr } => self.nb_nat_to_ctor(depth, ptr),
             Value::StrLit { ptr } => self.nb_str_to_ctor(depth, ptr),
@@ -682,7 +688,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn nb_nat_to_ctor(&mut self, depth: u32, n: BigUintPtr<'t>) -> Option<ValId> {
+    fn nb_nat_to_ctor(&mut self, depth: u32, n: BigUintPtr<'t>) -> Option<V> {
         if !self.nat_ext() {
             return None;
         }
@@ -696,15 +702,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let pred = self.ctx.alloc_bignum(nv - 1u8)?;
             let pred_v = self.ctx.nb.mk_nat(pred);
             let succ = self.ctx.export_file.name_cache.nat_succ?;
-            let spine = self.ctx.nb.spine_snoc(SPINE_EMPTY, Elim::App(pred_v));
-            Some(self.ctx.nb.mk_rigid(RigidHead::Const(ConstKind::Ctor, succ, levels), spine))
+            let spine = self.ctx.nb.spine_snoc(SPINE_EMPTY, Elim::App(pred_v.id()));
+            Some(self.ctx.nb.mk_rigid(RigidHead::Const(ConstKind::Ctor, succ, levels), spine.id()))
         }
     }
 
-    pub(crate) fn nb_str_to_ctor(&mut self, depth: u32, s: StringPtr<'t>) -> Option<ValId> {
+    pub(crate) fn nb_str_to_ctor(&mut self, depth: u32, s: StringPtr<'t>) -> Option<V> {
         let e = self.ctx.str_lit_to_constructor(s)?;
         let v = self.nb_eval(depth, VENV_NIL, e);
-        Some(self.nb_whnf(depth, v))
+        Some(self.nb_whnf(depth, v.id()))
     }
 
     /// The K rule: a proof of an inductive proposition with one nullary
@@ -715,16 +721,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         rec: &RecursorData<'t>,
         levels: LevelsPtr<'t>,
         args: &[ValId],
-    ) -> Option<ValId> {
+    ) -> Option<V> {
         if !rec.is_k {
             return None;
         }
         let raw = self.nb_force(depth, args[rec.major_idx()]);
-        let kctor = self.nb_k_reduce(depth, raw, rec)?;
-        self.nb_fire_recursor(depth, rec, levels, args, kctor)
+        let kctor = self.nb_k_reduce(depth, raw.id(), rec)?;
+        self.nb_fire_recursor(depth, rec, levels, args, kctor.id())
     }
 
-    fn nb_k_reduce(&mut self, depth: u32, major: ValId, rec: &RecursorData<'t>) -> Option<ValId> {
+    fn nb_k_reduce(&mut self, depth: u32, major: ValId, rec: &RecursorData<'t>) -> Option<V> {
         if !rec.is_k {
             return None;
         }
@@ -732,8 +738,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return None;
         }
         let major_ty = self.nb_type(depth, major);
-        let major_ty = self.nb_whnf(depth, major_ty);
-        let (ty_name, ty_levels, ty_args) = self.nb_as_inductive(major_ty)?;
+        let major_ty = self.nb_whnf(depth, major_ty.id());
+        let (ty_name, ty_levels, ty_args) = self.nb_as_inductive(major_ty.id())?;
         let rec_induct = self.ctx.get_major_induct(rec)?;
         if ty_name != rec_induct {
             return None;
@@ -753,10 +759,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             .nb
             .mk_rigid(RigidHead::Const(ConstKind::Ctor, ctor_name, ty_levels), SPINE_EMPTY);
         for &a in ty_args.iter().take(take) {
-            new_ctor = self.nb_apply(depth, new_ctor, a);
+            new_ctor = self.nb_apply(depth, new_ctor.id(), a);
         }
-        let new_ty = self.nb_type(depth, new_ctor);
-        if !self.nb_conv(depth, major_ty, new_ty) {
+        let new_ty = self.nb_type(depth, new_ctor.id());
+        if !self.nb_conv(depth, major_ty.id(), new_ty.id()) {
             return None;
         }
         Some(new_ctor)
@@ -769,7 +775,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         depth: u32,
         major: ValId,
         rec: &RecursorData<'t>,
-    ) -> Option<ValId> {
+    ) -> Option<V> {
         if !matches!(self.ctx.nb.get(major), Value::Rigid { .. } | Value::Unfold { .. }) {
             return None;
         }
@@ -778,11 +784,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return None;
         }
         if let Some(&r) = self.ctx.nb.struct_eta_cache.get(&(major, rec_induct)) {
-            return r;
+            return r.map(V::own);
         }
         let np = usize::from(rec.num_params);
         let r = self.nb_struct_eta_go(depth, major, rec_induct, np);
-        self.ctx.nb.struct_eta_cache.insert((major, rec_induct), r);
+        self.ctx.nb.struct_eta_cache.insert((major, rec_induct), r.as_ref().map(V::id));
         r
     }
 
@@ -792,17 +798,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         major: ValId,
         rec_induct: NamePtr<'t>,
         np: usize,
-    ) -> Option<ValId> {
+    ) -> Option<V> {
         let major_ty = self.nb_type(depth, major);
-        let major_ty = self.nb_whnf(depth, major_ty);
-        let (ty_name, ty_levels, ty_args) = self.nb_as_inductive(major_ty)?;
+        let major_ty = self.nb_whnf(depth, major_ty.id());
+        let (ty_name, ty_levels, ty_args) = self.nb_as_inductive(major_ty.id())?;
         if ty_name != rec_induct {
             return None;
         }
         // A structure whose universe an instantiation may send to zero is
         // left alone: expanding a proof into its fields would equate proofs
         // that proof irrelevance already equates on other grounds.
-        if self.nb_may_be_prop(depth, major_ty) {
+        if self.nb_may_be_prop(depth, major_ty.id()) {
             return None;
         }
         let ind = self.env.get_inductive(&ty_name)?;
@@ -813,11 +819,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             .nb
             .mk_rigid(RigidHead::Const(ConstKind::Ctor, ctor_name, ty_levels), SPINE_EMPTY);
         for &a in ty_args.iter().take(np) {
-            new_ctor = self.nb_apply(depth, new_ctor, a);
+            new_ctor = self.nb_apply(depth, new_ctor.id(), a);
         }
         for i in 0..num_fields {
             let proj = self.nb_proj(depth, ty_name, i, major);
-            new_ctor = self.nb_apply(depth, new_ctor, proj);
+            new_ctor = self.nb_apply(depth, new_ctor.id(), proj.id());
         }
         Some(new_ctor)
     }
@@ -870,7 +876,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return false;
         }
         let a = self.nb_force(depth, args[1]);
-        match self.ctx.nb.get(a) {
+        match self.ctx.nb.get(a.id()) {
             Value::NatLit { ptr } => {
                 self.ctx.read_bignum(ptr).map(|n| n.bits() > 8).unwrap_or(false)
             }
@@ -887,7 +893,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         name: NamePtr<'t>,
         args: &[ValId],
         deep: bool,
-    ) -> Option<ValId> {
+    ) -> Option<V> {
         let nc = self.ctx.export_file.name_cache;
         if args.len() == 1 && Some(name) == nc.nat_succ {
             let n = self.nb_bignum(depth, args[0], deep)?;
@@ -953,12 +959,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn nb_mk_nat(&mut self, n: BigUint) -> Option<ValId> {
+    fn nb_mk_nat(&mut self, n: BigUint) -> Option<V> {
         let p = self.ctx.alloc_bignum(n)?;
         Some(self.ctx.nb.mk_nat(p))
     }
 
-    fn nb_mk_bool(&mut self, b: bool) -> Option<ValId> {
+    fn nb_mk_bool(&mut self, b: bool) -> Option<V> {
         let nc = self.ctx.export_file.name_cache;
         let name = if b { nc.bool_true? } else { nc.bool_false? };
         let levels = self.ctx.alloc_levels_slice(&[]);
@@ -972,7 +978,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut succs: u64 = 0;
         let mut cur = self.nb_force(depth, v);
         loop {
-            match self.ctx.nb.get(cur) {
+            match self.ctx.nb.get(cur.id()) {
                 Value::NatLit { ptr } => {
                     return self.ctx.read_bignum(ptr).cloned().map(|n| n + succs);
                 }
@@ -989,16 +995,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     }
                     return None;
                 }
-                Value::Unfold { forced: Some(f), .. } if f != cur => {
-                    cur = f;
+                Value::Unfold { forced: Some(f), .. } if f != cur.id() => {
+                    cur = V::own(f);
                 }
                 Value::Unfold { .. }
                 | Value::Rigid { head: RigidHead::Const(ConstKind::Recursor, ..), .. }
                 | Value::Rigid { head: RigidHead::Const(ConstKind::QuotConst, ..), .. } => {
-                    if !deep || self.nb_is_open(depth, cur) {
+                    if !deep || self.nb_is_open(depth, cur.id()) {
                         return None;
                     }
-                    let f = self.nb_whnf(depth, cur);
+                    let f = self.nb_whnf(depth, cur.id());
                     if f == cur {
                         return None;
                     }
@@ -1013,10 +1019,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// that has none can be reduced without risk of getting stuck on one.
     pub(crate) fn nb_is_open(&mut self, depth: u32, v: ValId) -> bool {
         let v = self.nb_force(depth, v);
-        if let Some(&b) = self.ctx.nb.open_cache.get(&v) {
+        if let Some(&b) = self.ctx.nb.open_cache.get(&v.id()) {
             return b;
         }
-        let r = match self.ctx.nb.get(v) {
+        let r = match self.ctx.nb.get(v.id()) {
             Value::Sort { .. } | Value::NatLit { .. } | Value::StrLit { .. } => false,
             Value::Rigid { head: RigidHead::BVar(..) | RigidHead::Local(..), .. } => true,
             Value::Rigid { spine, .. } | Value::Unfold { spine, .. } => {
@@ -1034,7 +1040,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             Value::Lam { .. } | Value::Pi { .. } => false,
             Value::Thunk { .. } => unreachable!("nb_is_open: thunk after forcing"),
         };
-        self.ctx.nb.open_cache.insert(v, r);
+        self.ctx.nb.open_cache.insert(v.id(), r);
         r
     }
 
@@ -1097,17 +1103,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         out
     }
 
-    pub(crate) fn nb_type(&mut self, depth: u32, v: ValId) -> ValId {
+    pub(crate) fn nb_type(&mut self, depth: u32, v: ValId) -> V {
         let v = self.nb_force(depth, v);
-        if let Some(&t) = self.ctx.nb.type_cache.get(&v) {
-            return t;
+        if let Some(&t) = self.ctx.nb.type_cache.get(&v.id()) {
+            return V::own(t);
         }
-        let t = self.nb_type_go(depth, v);
-        self.ctx.nb.type_cache.insert(v, t);
+        let t = self.nb_type_go(depth, v.id());
+        self.ctx.nb.type_cache.insert(v.id(), t.id());
         t
     }
 
-    fn nb_type_go(&mut self, depth: u32, v: ValId) -> ValId {
+    fn nb_type_go(&mut self, depth: u32, v: ValId) -> V {
         match self.ctx.nb.get(v) {
             Value::Sort { level } => {
                 let s = self.ctx.succ(level);
@@ -1139,9 +1145,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn nb_head_type(&mut self, depth: u32, head: RigidHead<'t>) -> ValId {
+    fn nb_head_type(&mut self, depth: u32, head: RigidHead<'t>) -> V {
         match head {
-            RigidHead::BVar(_, ty) => ty,
+            RigidHead::BVar(_, ty) => V::own(ty),
             RigidHead::Local(e) => {
                 let Local { binder_type, .. } = self.ctx.read_expr(e) else {
                     panic!("nb_head_type: not a local")
@@ -1154,14 +1160,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// The type a constant's declaration gives it, with its level parameters
     /// replaced, evaluated once per constant.
-    pub(crate) fn nb_const_type(&mut self, name: NamePtr<'t>, levels: LevelsPtr<'t>) -> ValId {
-        if let Some(&v) = self.ctx.nb.const_ty_cache.get(&(name, levels)) {
-            return v;
+    pub(crate) fn nb_const_type(&mut self, name: NamePtr<'t>, levels: LevelsPtr<'t>) -> V {
+        if let Some(v) = self.ctx.nb.const_ty_cache.get(&(name, levels)) {
+            return v.clone();
         }
         let info = *self.env.get_declar(&name).expect("nb_const_type: unknown constant").info();
         let ty = self.ctx.subst_expr_levels(info.ty, info.uparams, levels);
         let v = self.nb_eval(0, VENV_NIL, ty);
-        self.ctx.nb.const_ty_cache.insert((name, levels), v);
+        self.ctx.nb.const_ty_cache.insert((name, levels), v.clone());
         v
     }
 
@@ -1171,26 +1177,26 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn nb_spine_type(
         &mut self,
         depth: u32,
-        mut ty: ValId,
-        base: ValId,
+        mut ty: V,
+        base: V,
         spine: SpineId,
-    ) -> ValId {
+    ) -> V {
         let mut prev = base;
         for elim in self.ctx.nb.spine_to_vec(spine) {
             match elim {
                 Elim::App(a) => {
-                    let ty_f = self.nb_whnf(depth, ty);
-                    if !matches!(self.ctx.nb.get(ty_f), Value::Pi { .. }) {
+                    let ty_f = self.nb_whnf(depth, ty.id());
+                    if !matches!(self.ctx.nb.get(ty_f.id()), Value::Pi { .. }) {
                         panic!("nb_spine_type: applied a non-function");
                     }
-                    ty = self.nb_open(depth, ty_f, a);
-                    prev = self.nb_apply(depth, prev, a);
+                    ty = self.nb_open(depth, ty_f.id(), a);
+                    prev = self.nb_apply(depth, prev.id(), a);
                 }
                 Elim::Proj { ty_name, idx } => {
                     ty = self
-                        .nb_field_type(depth, prev, ty, ty_name, idx)
+                        .nb_field_type(depth, prev.id(), ty.id(), ty_name, idx)
                         .expect("nb_spine_type: projected a non-structure");
-                    prev = self.nb_proj(depth, ty_name, idx, prev);
+                    prev = self.nb_proj(depth, ty_name, idx, prev.id());
                 }
             }
         }
@@ -1207,9 +1213,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         struct_ty: ValId,
         ty_name: NamePtr<'t>,
         idx: usize,
-    ) -> Option<ValId> {
+    ) -> Option<V> {
         let struct_ty = self.nb_whnf(depth, struct_ty);
-        let (ind_name, ind_levels, args) = self.nb_as_inductive(struct_ty)?;
+        let (ind_name, ind_levels, args) = self.nb_as_inductive(struct_ty.id())?;
         if ind_name != ty_name {
             return None;
         }
@@ -1220,22 +1226,22 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let ctor_ty = self.ctx.subst_expr_levels(ctor_info.ty, ctor_info.uparams, ind_levels);
         let mut cur = self.nb_eval(depth, VENV_NIL, ctor_ty);
         for i in 0..num_params {
-            let cur_f = self.nb_whnf(depth, cur);
-            if !matches!(self.ctx.nb.get(cur_f), Value::Pi { .. }) {
+            let cur_f = self.nb_whnf(depth, cur.id());
+            if !matches!(self.ctx.nb.get(cur_f.id()), Value::Pi { .. }) {
                 return None;
             }
-            cur = self.nb_open(depth, cur_f, *args.get(i)?);
+            cur = self.nb_open(depth, cur_f.id(), *args.get(i)?);
         }
         for i in 0..idx {
-            let cur_f = self.nb_whnf(depth, cur);
-            if !matches!(self.ctx.nb.get(cur_f), Value::Pi { .. }) {
+            let cur_f = self.nb_whnf(depth, cur.id());
+            if !matches!(self.ctx.nb.get(cur_f.id()), Value::Pi { .. }) {
                 return None;
             }
             let prior = self.nb_proj(depth, ty_name, i, struct_value);
-            cur = self.nb_open(depth, cur_f, prior);
+            cur = self.nb_open(depth, cur_f.id(), prior.id());
         }
-        let cur_f = self.nb_whnf(depth, cur);
-        match self.ctx.nb.get(cur_f) {
+        let cur_f = self.nb_whnf(depth, cur.id());
+        match self.ctx.nb.get(cur_f.id()) {
             Value::Pi { domain, .. } => Some(self.nb_force(depth, domain)),
             _ => None,
         }
@@ -1245,7 +1251,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// inferring the type of the type.
     pub(crate) fn nb_type_level(&mut self, depth: u32, ty: ValId) -> Option<LevelPtr<'t>> {
         let ty = self.nb_force(depth, ty);
-        match self.ctx.nb.get(ty) {
+        match self.ctx.nb.get(ty.id()) {
             Value::Sort { level } => {
                 let s = self.ctx.succ(level);
                 Some(self.ctx.simplify(s))
@@ -1253,10 +1259,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             Value::Pi { domain, .. } => {
                 let l_dom = self.nb_type_level(depth, domain)?;
                 let dom = self.nb_force(depth, domain);
-                let fresh = self.ctx.nb.mk_bvar(depth, dom);
-                let cod = self.nb_open(depth + 1, ty, fresh);
-                let cod = self.nb_whnf(depth + 1, cod);
-                let l_cod = self.nb_type_level(depth + 1, cod)?;
+                let fresh = self.ctx.nb.mk_bvar(depth, dom.id());
+                let cod = self.nb_open(depth + 1, ty.id(), fresh.id());
+                let cod = self.nb_whnf(depth + 1, cod.id());
+                let l_cod = self.nb_type_level(depth + 1, cod.id())?;
                 let l = self.ctx.imax(l_dom, l_cod);
                 Some(self.ctx.simplify(l))
             }
@@ -1264,23 +1270,23 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 if let Some(l) = self.nb_const_level(n, ls) {
                     return Some(l);
                 }
-                self.nb_sort_of(depth, ty)
+                self.nb_sort_of(depth, ty.id())
             }
             Value::Unfold { name, levels, .. } => {
-                if let Some(l) = self.nb_sort_of(depth, ty) {
+                if let Some(l) = self.nb_sort_of(depth, ty.id()) {
                     return Some(l);
                 }
                 self.nb_const_level(name, levels)
             }
-            Value::Rigid { .. } => self.nb_sort_of(depth, ty),
+            Value::Rigid { .. } => self.nb_sort_of(depth, ty.id()),
             _ => None,
         }
     }
 
     fn nb_sort_of(&mut self, depth: u32, ty: ValId) -> Option<LevelPtr<'t>> {
         let t = self.nb_type(depth, ty);
-        let t = self.nb_whnf(depth, t);
-        match self.ctx.nb.get(t) {
+        let t = self.nb_whnf(depth, t.id());
+        match self.ctx.nb.get(t.id()) {
             Value::Sort { level } => Some(self.ctx.simplify(level)),
             _ => None,
         }
@@ -1298,12 +1304,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut cur = self.nb_const_type(name, levels);
         let mut d = 0u32;
         let r = loop {
-            let cur_f = self.nb_whnf(d, cur);
-            match self.ctx.nb.get(cur_f) {
+            let cur_f = self.nb_whnf(d, cur.id());
+            match self.ctx.nb.get(cur_f.id()) {
                 Value::Pi { domain, .. } => {
                     let dom = self.nb_force(d, domain);
-                    let fresh = self.ctx.nb.mk_bvar(d, dom);
-                    cur = self.nb_open(d + 1, cur_f, fresh);
+                    let fresh = self.ctx.nb.mk_bvar(d, dom.id());
+                    cur = self.nb_open(d + 1, cur_f.id(), fresh.id());
                     d += 1;
                 }
                 Value::Sort { level } => break Some(self.ctx.simplify(level)),

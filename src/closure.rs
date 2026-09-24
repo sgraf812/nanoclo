@@ -62,6 +62,17 @@ pub(crate) struct SClo<'t> {
     pub spine: SpineVec<'t>,
 }
 
+/// Take the references a new environment node holds: its parent and what its
+/// entry names. Read views are keys only and hold nothing.
+fn hold_entry(parent: EnvId, entry: Entry<'_>) {
+    crate::rc::inc_env(parent);
+    match entry {
+        Entry::V(v) => crate::rc::inc_val(v),
+        Entry::Val(_, env) if env & VIEW_BIT == 0 => crate::rc::inc_env(env),
+        Entry::Val(..) | Entry::Neu(_) => {}
+    }
+}
+
 /// Injective packing of an environment-extension request into two words
 /// (pointer raw bits are 32-bit).
 #[inline]
@@ -183,6 +194,7 @@ impl<'t> CloState<'t> {
         CloState {
             envs: {
                 let mut e = crate::arena::Arena::new();
+                crate::rc::counts().envs.push(1);
                 e.push(EnvNode { entry: Entry::Val(crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0), 0), parent: 0, len: 0, next_level: 0, jump: 0 });
                 e
             },
@@ -231,6 +243,9 @@ impl<'t> CloState<'t> {
             }
         }
         self.envs.truncate(1);
+        crate::rc::counts().envs.truncate(1);
+        crate::rc::counts().envs[0] = 1;
+        crate::rc::PINS.with(|p| p.set(0));
         rm(&mut self.env_intern);
         rm(&mut self.infer_cache_check);
         rm(&mut self.infer_cache_only);
@@ -358,11 +373,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// Extend an environment with an evaluated entry. Everything the new
     /// node holds comes from the parent node, so a miss costs one probe.
-    pub(crate) fn push_entry_v(&mut self, env: EnvId, v: crate::nbe::ValId) -> EnvId {
+    pub(crate) fn push_entry_v(&mut self, env: EnvId, v: crate::nbe::ValId) -> crate::rc::E {
         self.ctx.rp.ctrs[10] += 1;
         let key = pack_entry_key(env, Entry::V(v));
         let crate::closure::CloState { envs, env_intern, .. } = &mut self.ctx.rp;
-        match env_intern.entry(key) {
+        let id = match env_intern.entry(key) {
             std::collections::hash_map::Entry::Occupied(o) => *o.get(),
             std::collections::hash_map::Entry::Vacant(slot) => {
                 let p = &envs[env as usize];
@@ -376,11 +391,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 };
                 let id = u32::try_from(envs.len()).unwrap();
                 debug_assert!(id < VIEW_BIT);
+                hold_entry(env, Entry::V(v));
                 envs.push(EnvNode { entry: Entry::V(v), parent: env, len, next_level, jump });
+                crate::rc::counts().envs.push(0);
                 slot.insert(id);
                 id
             }
-        }
+        };
+        crate::rc::E::own(id)
     }
 
     pub(crate) fn push_entry(&mut self, env: EnvId, entry: Entry<'t>) -> EnvId {
@@ -400,7 +418,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             e => e,
         };
         let key = pack_entry_key(env, entry);
+        // The closure checker holds its environments without counting them,
+        // so each one it receives is pinned for the rest of the declaration.
         if let Some(&id) = self.ctx.rp.env_intern.get(&key) {
+            crate::rc::pin_env(id);
             return id;
         }
         let len = self.env_len(env) + 1;
@@ -427,7 +448,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         };
         let id = u32::try_from(self.ctx.rp.envs.len()).unwrap();
         debug_assert!(id < VIEW_BIT);
+        hold_entry(env, entry);
         self.ctx.rp.envs.push(EnvNode { entry, parent: env, len, next_level, jump });
+        crate::rc::counts().envs.push(0);
+        crate::rc::pin_env(id);
         self.ctx.rp.env_intern.insert(key, id);
         id
     }

@@ -17,6 +17,7 @@
 use crate::tc::SPEC_BUDGET;
 use crate::env::{Declar, ReducibilityHint};
 use crate::nbe::{ConstKind, Elim, RigidHead, SpineId, ValId, Value};
+use crate::rc::V;
 use crate::tc::TypeChecker;
 use crate::util::NamePtr;
 
@@ -75,7 +76,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             self.ctx.nb.probe_fuel -= 1;
         }
-        self.nb_unify_cached::<RIGID>(depth, x, y)
+        self.nb_unify_cached::<RIGID>(depth, x.id(), y.id())
     }
 
     fn nb_unify_cached<const RIGID: bool>(&mut self, depth: u32, x: ValId, y: ValId) -> bool {
@@ -136,17 +137,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         match (self.ctx.nb.get(x), self.ctx.nb.get(y)) {
             (Value::Lam { .. }, ref o) if !matches!(o, Value::Lam { .. }) => {
                 let domain = self.nb_lam_domain(depth, x);
-                let fresh = self.ctx.nb.mk_bvar(depth, domain);
-                let lhs = self.nb_open(depth + 1, x, fresh);
-                let rhs = self.nb_apply(depth + 1, y, fresh);
-                return self.nb_unify::<true>(depth + 1, lhs, rhs);
+                let fresh = self.ctx.nb.mk_bvar(depth, domain.id());
+                let lhs = self.nb_open(depth + 1, x, fresh.id());
+                let rhs = self.nb_apply(depth + 1, y, fresh.id());
+                return self.nb_unify::<true>(depth + 1, lhs.id(), rhs.id());
             }
             (ref o, Value::Lam { .. }) if !matches!(o, Value::Lam { .. }) => {
                 let domain = self.nb_lam_domain(depth, y);
-                let fresh = self.ctx.nb.mk_bvar(depth, domain);
-                let lhs = self.nb_apply(depth + 1, x, fresh);
-                let rhs = self.nb_open(depth + 1, y, fresh);
-                return self.nb_unify::<true>(depth + 1, lhs, rhs);
+                let fresh = self.ctx.nb.mk_bvar(depth, domain.id());
+                let lhs = self.nb_apply(depth + 1, x, fresh.id());
+                let rhs = self.nb_open(depth + 1, y, fresh.id());
+                return self.nb_unify::<true>(depth + 1, lhs.id(), rhs.id());
             }
             _ => {}
         }
@@ -167,18 +168,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     return false;
                 }
                 let dom = self.nb_force(depth, dx);
-                let fresh = self.ctx.nb.mk_bvar(depth, dom);
-                let bx = self.nb_open(depth + 1, x, fresh);
-                let by = self.nb_open(depth + 1, y, fresh);
-                self.nb_unify::<RIGID>(depth + 1, bx, by)
+                let fresh = self.ctx.nb.mk_bvar(depth, dom.id());
+                let bx = self.nb_open(depth + 1, x, fresh.id());
+                let by = self.nb_open(depth + 1, y, fresh.id());
+                self.nb_unify::<RIGID>(depth + 1, bx.id(), by.id())
             }
 
             (Value::Lam { .. }, Value::Lam { .. }) => {
                 let dom = self.nb_lam_domain(depth, x);
-                let fresh = self.ctx.nb.mk_bvar(depth, dom);
-                let bx = self.nb_open(depth + 1, x, fresh);
-                let by = self.nb_open(depth + 1, y, fresh);
-                self.nb_unify::<RIGID>(depth + 1, bx, by)
+                let fresh = self.ctx.nb.mk_bvar(depth, dom.id());
+                let bx = self.nb_open(depth + 1, x, fresh.id());
+                let by = self.nb_open(depth + 1, y, fresh.id());
+                self.nb_unify::<RIGID>(depth + 1, bx.id(), by.id())
             }
 
             (
@@ -240,26 +241,26 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     return true;
                 }
                 let mut x2 = self.nb_unfold(depth, x);
-                if x2 == x {
+                if x2.id() == x {
                     x2 = self.nb_unfold_demand(depth, x);
-                    if x2 == x {
+                    if x2.id() == x {
                         return false;
                     }
                 }
-                self.nb_unify::<true>(depth, x2, y)
+                self.nb_unify::<true>(depth, x2.id(), y)
             }
             (_, Value::Unfold { .. }) if RIGID => {
                 if self.nb_proof_irrel(depth, x, y) {
                     return true;
                 }
                 let mut y2 = self.nb_unfold(depth, y);
-                if y2 == y {
+                if y2.id() == y {
                     y2 = self.nb_unfold_demand(depth, y);
-                    if y2 == y {
+                    if y2.id() == y {
                         return false;
                     }
                 }
-                self.nb_unify::<true>(depth, x, y2)
+                self.nb_unify::<true>(depth, x, y2.id())
             }
 
             (Value::Rigid { head: RigidHead::Const(k, ..), spine: sx }, _)
@@ -270,7 +271,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     return true;
                 }
                 match self.nb_iota(depth, x) {
-                    Some(x2) => self.nb_unify::<true>(depth, x2, y),
+                    Some(x2) => self.nb_unify::<true>(depth, x2.id(), y),
                     None => false,
                 }
             }
@@ -281,7 +282,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     return true;
                 }
                 match self.nb_iota(depth, y) {
-                    Some(y2) => self.nb_unify::<true>(depth, x, y2),
+                    Some(y2) => self.nb_unify::<true>(depth, x, y2.id()),
                     None => false,
                 }
             }
@@ -295,44 +296,44 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn nb_unfold_one<const LEFT: bool>(&mut self, depth: u32, x: ValId, y: ValId) -> bool {
         let (first, second) = if LEFT { (x, y) } else { (y, x) };
         let f2 = self.nb_unfold(depth, first);
-        if f2 != first {
+        if f2.id() != first {
             return if LEFT {
-                self.nb_unify::<true>(depth, f2, y)
+                self.nb_unify::<true>(depth, f2.id(), y)
             } else {
-                self.nb_unify::<true>(depth, x, f2)
+                self.nb_unify::<true>(depth, x, f2.id())
             };
         }
         let s2 = self.nb_unfold(depth, second);
-        if s2 != second {
+        if s2.id() != second {
             return if LEFT {
-                self.nb_unify::<true>(depth, first, s2)
+                self.nb_unify::<true>(depth, first, s2.id())
             } else {
-                self.nb_unify::<true>(depth, s2, first)
+                self.nb_unify::<true>(depth, s2.id(), first)
             };
         }
         let d2 = self.nb_unfold_demand(depth, first);
-        if d2 == first {
+        if d2.id() == first {
             return false;
         }
         if LEFT {
-            self.nb_unify::<true>(depth, d2, y)
+            self.nb_unify::<true>(depth, d2.id(), y)
         } else {
-            self.nb_unify::<true>(depth, x, d2)
+            self.nb_unify::<true>(depth, x, d2.id())
         }
     }
 
     fn nb_unfold_pair(&mut self, depth: u32, x: ValId, y: ValId) -> bool {
         let x2 = self.nb_unfold(depth, x);
         let y2 = self.nb_unfold(depth, y);
-        if x2 == x && y2 == y {
+        if x2.id() == x && y2.id() == y {
             let f1 = self.nb_unfold_demand(depth, x);
             let f2 = self.nb_unfold_demand(depth, y);
-            if f1 == x && f2 == y {
+            if f1.id() == x && f2.id() == y {
                 return false;
             }
-            return self.nb_unify::<true>(depth, f1, f2);
+            return self.nb_unify::<true>(depth, f1.id(), f2.id());
         }
-        self.nb_unify::<true>(depth, x2, y2)
+        self.nb_unify::<true>(depth, x2.id(), y2.id())
     }
 
     fn nb_unify_iota<const RIGID: bool>(
@@ -353,10 +354,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if self.nb_proof_irrel(depth, x, y) {
             return true;
         }
-        let x2 = self.nb_iota(depth, x).unwrap_or(x);
-        let y2 = self.nb_iota(depth, y).unwrap_or(y);
-        if x2 != x || y2 != y {
-            let r = self.nb_unify::<true>(depth, x2, y2);
+        let x2 = self.nb_iota(depth, x).unwrap_or_else(|| V::own(x));
+        let y2 = self.nb_iota(depth, y).unwrap_or_else(|| V::own(y));
+        if x2.id() != x || y2.id() != y {
+            let r = self.nb_unify::<true>(depth, x2.id(), y2.id());
             self.ctx.nb.probe_escalate = 0;
             return r;
         }
@@ -463,14 +464,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return false;
         }
         let tx = self.nb_type(depth, x);
-        if !self.nb_is_prop(depth, tx) {
+        if !self.nb_is_prop(depth, tx.id()) {
             return false;
         }
         let ty = self.nb_type(depth, y);
-        if !self.nb_is_prop(depth, ty) {
+        if !self.nb_is_prop(depth, ty.id()) {
             return false;
         }
-        self.nb_unify::<true>(depth, tx, ty)
+        self.nb_unify::<true>(depth, tx.id(), ty.id())
     }
 
     /// A function into a proposition is pointwise a proof, so compare the
@@ -478,10 +479,10 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn nb_proof_irrel_lam(&mut self, depth: u32, x: ValId, y: ValId) -> bool {
         let lam = if matches!(self.ctx.nb.get(x), Value::Lam { .. }) { x } else { y };
         let domain = self.nb_lam_domain(depth, lam);
-        let fresh = self.ctx.nb.mk_bvar(depth, domain);
-        let xb = self.nb_apply(depth + 1, x, fresh);
-        let yb = self.nb_apply(depth + 1, y, fresh);
-        self.nb_proof_irrel(depth + 1, xb, yb)
+        let fresh = self.ctx.nb.mk_bvar(depth, domain.id());
+        let xb = self.nb_apply(depth + 1, x, fresh.id());
+        let yb = self.nb_apply(depth + 1, y, fresh.id());
+        self.nb_proof_irrel(depth + 1, xb.id(), yb.id())
     }
 
     fn nb_is_prop(&mut self, depth: u32, ty: ValId) -> bool {
@@ -511,8 +512,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 continue;
             }
             let ty = self.nb_type(depth, v);
-            let ty = self.nb_whnf(depth, ty);
-            let Some((ind_name, _, _)) = self.nb_as_inductive(ty) else { continue };
+            let ty = self.nb_whnf(depth, ty.id());
+            let Some((ind_name, _, _)) = self.nb_as_inductive(ty.id()) else { continue };
             if self.nb_is_unit(ind_name) {
                 return true;
             }
@@ -548,7 +549,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         for i in 0..num_fields {
             let proj = self.nb_proj(depth, ind_name, i, x);
-            if !self.nb_unify::<true>(depth, proj, args[num_params + i]) {
+            if !self.nb_unify::<true>(depth, proj.id(), args[num_params + i]) {
                 return false;
             }
         }
@@ -591,7 +592,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let px = self.nb_nat_pred(x);
         let py = self.nb_nat_pred(y);
         match (px, py) {
-            (Some(a), Some(b)) => Some(self.nb_unify::<RIGID>(depth, a, b)),
+            (Some(a), Some(b)) => Some(self.nb_unify::<RIGID>(depth, a.id(), b.id())),
             _ => None,
         }
     }
@@ -618,7 +619,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return None;
         };
         let c = self.nb_str_to_ctor(depth, ptr)?;
-        Some(self.nb_unify::<RIGID>(depth, c, other))
+        Some(self.nb_unify::<RIGID>(depth, c.id(), other))
     }
 
     fn nb_is_string_ctor(&self, v: ValId) -> bool {
@@ -657,7 +658,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
     }
 
-    fn nb_nat_pred(&mut self, v: ValId) -> Option<ValId> {
+    fn nb_nat_pred(&mut self, v: ValId) -> Option<V> {
         match self.ctx.nb.get(v) {
             Value::Rigid { head: RigidHead::Const(ConstKind::Ctor, name, _), spine } => {
                 if Some(name) != self.ctx.export_file.name_cache.nat_succ
@@ -666,7 +667,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     return None;
                 }
                 match self.ctx.nb.spine_get(spine, 0) {
-                    Some(Elim::App(a)) => Some(a),
+                    Some(Elim::App(a)) => Some(V::own(a)),
                     _ => None,
                 }
             }

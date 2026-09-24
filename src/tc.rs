@@ -89,6 +89,13 @@ impl<'p> ExportFile<'p> {
     }
 
     fn check_declar_attempt<'t>(&'t self, ctx: &mut TcCtx<'t, 'p>, d: &Declar<'p>) {
+        self.check_declar_attempt0(ctx, d);
+        if std::env::var_os("NANOCLO_RC_CHECK").is_some() {
+            ctx.check_counts();
+        }
+    }
+
+    fn check_declar_attempt0<'t>(&'t self, ctx: &mut TcCtx<'t, 'p>, d: &Declar<'p>) {
         ctx.reset_decl();
         use Declar::*;
         match d {
@@ -302,9 +309,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return level;
         }
         let v = self.nb_of_clo(ty);
-        let v = self.nb_force(0, v);
-        let v = self.nb_whnf(0, v);
-        if let crate::nbe::Value::Sort { level } = self.ctx.nb.get(v) {
+        let v = self.nb_force(0, v.id());
+        let v = self.nb_whnf(0, v.id());
+        if let crate::nbe::Value::Sort { level } = self.ctx.nb.get(v.id()) {
             return level;
         }
         panic!("ensur_sort could not produce a sort")
@@ -350,9 +357,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     pub fn whnf(&mut self, e: ExprPtr<'t>) -> ExprPtr<'t> {
         let v = self.nb_of_clo(crate::closure::Clo::of(e));
-        let v = self.nb_force(0, v);
-        let v = self.nb_whnf(0, v);
-        let out = self.nb_readback(v);
+        let v = self.nb_force(0, v.id());
+        let v = self.nb_whnf(0, v.id());
+        let out = self.nb_readback(v.id());
         // mirror upstream whnf: sort levels come out simplified
         if let Sort { level, .. } = self.ctx.read_expr(out) {
             let level = self.ctx.simplify(level);
@@ -410,9 +417,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn is_prop_of_uncached(&mut self, e: ExprPtr<'t>) -> bool {
         let sort = self.infer_clo(Clo::of(e), InferOnly);
         let v = self.nb_of_clo(sort);
-        let v = self.nb_force(0, v);
-        let v = self.nb_whnf(0, v);
-        match self.ctx.nb.get(v) {
+        let v = self.nb_force(0, v.id());
+        let v = self.nb_whnf(0, v.id());
+        match self.ctx.nb.get(v.id()) {
             crate::nbe::Value::Sort { level } => self.ctx.is_zero(level),
             _ => panic!("expected a sort"),
         }
@@ -493,12 +500,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// environment, so nothing is translated. Memoized on the closure: the
     /// same term recurs at many def-eq entries, and this is the one place a
     /// whole skeleton would otherwise be rewalked.
-    pub(crate) fn nb_of_clo(&mut self, c: Clo<'t>) -> crate::nbe::ValId {
-        if let Some(&v) = self.ctx.nb.clo_val_cache.get(&(c.e, c.env)) {
-            return v;
+    pub(crate) fn nb_of_clo(&mut self, c: Clo<'t>) -> crate::rc::V {
+        if let Some(v) = self.ctx.nb.clo_val_cache.get(&(c.e, c.env)) {
+            return v.clone();
         }
         let v = self.nb_eval(0, c.env, c.e);
-        self.ctx.nb.clo_val_cache.insert((c.e, c.env), v);
+        self.ctx.nb.clo_val_cache.insert((c.e, c.env), v.clone());
         v
     }
 
@@ -531,9 +538,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     fn may_be_prop_of(&mut self, ty: Clo<'t>) -> bool {
         let sort = self.infer_clo(ty, InferOnly);
         let v = self.nb_of_clo(sort);
-        let v = self.nb_force(0, v);
-        let v = self.nb_whnf(0, v);
-        match self.ctx.nb.get(v) {
+        let v = self.nb_force(0, v.id());
+        let v = self.nb_whnf(0, v.id());
+        match self.ctx.nb.get(v.id()) {
             crate::nbe::Value::Sort { level } => self.ctx.may_be_prop(level),
             _ => panic!("expected a sort"),
         }
@@ -550,7 +557,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         self.ctx.rp.ctrs[3] += 1;
         let a = self.nb_of_clo(t);
         let b = self.nb_of_clo(s);
-        self.nb_conv(0, a, b)
+        self.nb_conv(0, a.id(), b.id())
     }
 
     fn infer_go(&mut self, c: Clo<'t>, flag: InferFlag) -> Clo<'t> {
@@ -569,7 +576,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 Entry::V(v) => {
                     self.ctx.rp.ctrs[18] += 1;
                     let ty = self.nb_type(0, v);
-                    Clo::of(self.nb_readback(ty))
+                    Clo::of(self.nb_readback(ty.id()))
                 }
             },
             Local { binder_type, .. } => {
@@ -765,20 +772,24 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             // anything else is forced to a Pi value. `dom_e` carries the
             // domain as a closure over `pi_env`, `dom_v` as a value.
             let (dom_e, dom_v, pi_env, body);
+            // the Pi value whose domain and environment this step reads
+            let pi_val;
             if let Pi { binder_type, body: b, .. } = self.ctx.read_expr(f_ty.e) {
+                pi_val = None;
                 dom_e = Some(binder_type);
                 dom_v = None;
                 pi_env = f_ty.env;
                 body = b;
             } else {
                 let fv = self.nb_of_clo(f_ty);
-                let fv = self.nb_force(0, fv);
-                let fv = self.nb_whnf(0, fv);
+                let fv = self.nb_force(0, fv.id());
+                let fv = self.nb_whnf(0, fv.id());
                 let crate::nbe::Value::Pi { domain, env, body: b, .. } =
-                    self.ctx.nb.get(fv)
+                    self.ctx.nb.get(fv.id())
                 else {
                     panic!("function expected");
                 };
+                pi_val = Some(fv);
                 dom_e = None;
                 dom_v = Some(domain);
                 pi_env = env;
@@ -805,17 +816,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         let a_ty = Clo::of(self.reify(a_ty));
                         let a = self.nb_of_clo(Clo { e: bt, env: pi_env });
                         let b = self.nb_of_clo(a_ty);
-                        self.nb_conv(0, a, b)
+                        self.nb_conv(0, a.id(), b.id())
                     }
                 } else {
                     let dom_v = dom_v.expect("domain");
                     let a_ty_v = self.nb_of_clo(a_ty);
-                    self.nb_conv(0, a_ty_v, dom_v)
+                    self.nb_conv(0, a_ty_v.id(), dom_v)
                 };
                 self.ctx.eager_mode = outer_eager;
                 assert!(ok, "application type mismatch");
             }
             let env2 = self.push_entry(pi_env, Entry::Val(arg.e, arg.env));
+            drop(pi_val);
             f_ty = Clo { e: body, env: env2 };
         }
         f_ty
@@ -830,9 +842,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     ) -> Clo<'t> {
         let s_ty = self.infer_clo(strukt, flag);
         let st_v = self.nb_of_clo(s_ty);
-        let st_v = self.nb_force(0, st_v);
-        let st_v = self.nb_whnf(0, st_v);
-        let crate::nbe::Value::Rigid { head, spine: st_spine } = self.ctx.nb.get(st_v) else {
+        let st_v = self.nb_force(0, st_v.id());
+        let st_v = self.nb_whnf(0, st_v.id());
+        let crate::nbe::Value::Rigid { head, spine: st_spine } = self.ctx.nb.get(st_v.id()) else {
             panic!("invalid projection");
         };
         let crate::nbe::RigidHead::Const(_, i_name, i_levels) = head else {
@@ -867,21 +879,21 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let mut r = Clo::of(c_ty);
         for pi in 0..num_params as usize {
             let rv = self.nb_of_clo(r);
-            let rv = self.nb_force(0, rv);
-            let rv = self.nb_whnf(0, rv);
-            let crate::nbe::Value::Pi { env: pi_env, body, .. } = self.ctx.nb.get(rv) else {
+            let rv = self.nb_force(0, rv.id());
+            let rv = self.nb_whnf(0, rv.id());
+            let crate::nbe::Value::Pi { env: pi_env, body, .. } = self.ctx.nb.get(rv.id()) else {
                 panic!("invalid projection");
             };
-            let env2 = self.push_entry_v(pi_env, st_args[pi]);
+            let env2 = self.push_entry_v(pi_env, st_args[pi]).pin();
             r = Clo { e: body, env: env2 };
         }
         let is_prop_ty = self.may_be_prop_of(s_ty);
         for fi in 0..idx {
             let rv = self.nb_of_clo(r);
-            let rv = self.nb_force(0, rv);
-            let rv = self.nb_whnf(0, rv);
+            let rv = self.nb_force(0, rv.id());
+            let rv = self.nb_whnf(0, rv.id());
             let crate::nbe::Value::Pi { domain, env: pi_env, body, .. } =
-                self.ctx.nb.get(rv)
+                self.ctx.nb.get(rv.id())
             else {
                 panic!("invalid projection");
             };
@@ -896,9 +908,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             r = Clo { e: body, env: env2 };
         }
         let rv = self.nb_of_clo(r);
-        let rv = self.nb_force(0, rv);
-        let rv = self.nb_whnf(0, rv);
-        let crate::nbe::Value::Pi { domain, .. } = self.ctx.nb.get(rv) else {
+        let rv = self.nb_force(0, rv.id());
+        let rv = self.nb_whnf(0, rv.id());
+        let crate::nbe::Value::Pi { domain, .. } = self.ctx.nb.get(rv.id()) else {
             panic!("invalid projection");
         };
         let d = self.nb_readback(domain);

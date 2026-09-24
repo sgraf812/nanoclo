@@ -14,6 +14,7 @@
 //! constant, so work done under one occurrence is not redone under another.
 
 use crate::expr::BinderStyle;
+use crate::rc::{self, S, V};
 use crate::util::{
     new_fx_hash_map, new_fx_hash_set, BigUintPtr, ExprPtr, FxHashMap, FxHashSet, LevelPtr,
     LevelsPtr, NamePtr, StringPtr,
@@ -132,17 +133,17 @@ pub(crate) struct Vals<'t> {
     // ---- memos ----
     /// `(expression, environment) -> its value`, populated only at def-eq
     /// entry points
-    pub(crate) clo_val_cache: FxHashMap<(ExprPtr<'t>, VEnvId), ValId>,
+    pub(crate) clo_val_cache: FxHashMap<(ExprPtr<'t>, VEnvId), V>,
     /// `(constant, levels) -> the value of its body`
-    pub(crate) unfold_cache: FxHashMap<(NamePtr<'t>, LevelsPtr<'t>), Option<ValId>>,
+    pub(crate) unfold_cache: FxHashMap<(NamePtr<'t>, LevelsPtr<'t>), Option<V>>,
     /// `(constant, levels) -> the value denoting it`
-    pub(crate) const_val_cache: FxHashMap<(NamePtr<'t>, LevelsPtr<'t>), ValId>,
+    pub(crate) const_val_cache: FxHashMap<(NamePtr<'t>, LevelsPtr<'t>), V>,
     /// `(constant, levels) -> the value of its type`
-    pub(crate) const_ty_cache: FxHashMap<(NamePtr<'t>, LevelsPtr<'t>), ValId>,
+    pub(crate) const_ty_cache: FxHashMap<(NamePtr<'t>, LevelsPtr<'t>), V>,
     /// `(constant, levels) -> the sort its type ends in`
     pub(crate) const_lvl_cache: FxHashMap<(NamePtr<'t>, LevelsPtr<'t>), Option<LevelPtr<'t>>>,
     /// `(recursor rule body, levels) -> the value of that body`
-    pub(crate) rec_rule_cache: FxHashMap<(ExprPtr<'t>, LevelsPtr<'t>), ValId>,
+    pub(crate) rec_rule_cache: FxHashMap<(ExprPtr<'t>, LevelsPtr<'t>), V>,
     /// `stuck application -> what it reduces to`, `None` when it is stuck
     pub(crate) iota_cache: FxHashMap<ValId, Option<ValId>>,
     /// `(value, inductive) -> the constructor application it expands to`
@@ -152,7 +153,7 @@ pub(crate) struct Vals<'t> {
     /// `value -> the value of its type`
     pub(crate) type_cache: FxHashMap<ValId, ValId>,
     /// `local expression -> the value denoting it`
-    pub(crate) local_cache: FxHashMap<ExprPtr<'t>, ValId>,
+    pub(crate) local_cache: FxHashMap<ExprPtr<'t>, V>,
     /// `rapier environment -> the same bindings as values`
 
     // ---- conversion results ----
@@ -201,6 +202,7 @@ impl<'t> Vals<'t> {
             // casing on the lookup paths.
             spines: {
                 let mut s = crate::arena::Arena::new();
+                rc::counts().spines.push(1);
                 s.push(SpineNode {
                     elim: Elim::Proj {
                         ty_name: crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0),
@@ -265,8 +267,6 @@ impl<'t> Vals<'t> {
                 m.clear();
             }
         }
-        self.vals.truncate(0);
-        self.spines.truncate(1);
         rm(&mut self.spine_intern_app);
         rm(&mut self.spine_intern_proj);
         rm(&mut self.rigid_intern);
@@ -297,55 +297,68 @@ impl<'t> Vals<'t> {
         self.probe_escalate = 0;
         self.probe_aborted = false;
         self.wrap_count = 0;
+        // the caches above held references; the nodes go only after them
+        self.vals.truncate(0);
+        self.spines.truncate(1);
+        rc::counts().vals.truncate(0);
+        rc::counts().spines.truncate(1);
+        rc::counts().spines[0] = 1;
     }
 
     #[inline]
     pub(crate) fn get(&self, v: ValId) -> Value<'t> { self.vals[v as usize] }
 
-    #[inline]
-    fn alloc(&mut self, v: Value<'t>) -> ValId {
-        let id = u32::try_from(self.vals.len()).expect("value arena overflow");
-        self.vals.push(v);
+    /// Append a value, taking a reference to each of its children.
+    fn alloc(vals: &mut crate::arena::Arena<Value<'t>>, v: Value<'t>) -> ValId {
+        let id = u32::try_from(vals.len()).expect("value arena overflow");
+        match v {
+            Value::Rigid { head, spine } => {
+                if let RigidHead::BVar(_, ty) = head {
+                    rc::inc_val(ty);
+                }
+                rc::inc_spine(spine);
+            }
+            Value::Unfold { spine, .. } => rc::inc_spine(spine),
+            Value::Lam { env, .. } | Value::Thunk { env, .. } => rc::inc_env(env),
+            Value::Pi { domain, env, .. } => {
+                rc::inc_val(domain);
+                rc::inc_env(env);
+            }
+            Value::Sort { .. } | Value::NatLit { .. } | Value::StrLit { .. } => {}
+        }
+        vals.push(v);
+        rc::counts().vals.push(0);
         id
     }
 
-    #[inline]
+    /// Append a spine node, taking a reference to its parent and argument.
+    fn alloc_spine(spines: &mut crate::arena::Arena<SpineNode<'t>>, parent: SpineId, elim: Elim<'t>) -> SpineId {
+        let len = spines[parent as usize].len + 1;
+        let id = u32::try_from(spines.len()).expect("spine arena overflow");
+        rc::inc_spine(parent);
+        if let Elim::App(a) = elim {
+            rc::inc_val(a);
+        }
+        spines.push(SpineNode { elim, parent, len });
+        rc::counts().spines.push(0);
+        id
+    }
 
     pub(crate) fn spine_len(&self, s: SpineId) -> u32 { self.spines[s as usize].len }
 
-    /// Extend an environment. Interned, so an environment built twice the
-    /// same way is the same environment.
-    pub(crate) fn spine_snoc(&mut self, parent: SpineId, elim: Elim<'t>) -> SpineId {
-        match elim {
-            Elim::App(a) => {
-                let Vals { spines, spine_intern_app, .. } = self;
-                match spine_intern_app.entry((parent, a)) {
-                    std::collections::hash_map::Entry::Occupied(o) => *o.get(),
-                    std::collections::hash_map::Entry::Vacant(v) => {
-                        let len = spines[parent as usize].len + 1;
-                        let id =
-                            u32::try_from(spines.len()).expect("spine arena overflow");
-                        spines.push(SpineNode { elim, parent, len });
-                        v.insert(id);
-                        id
-                    }
-                }
-            }
-            Elim::Proj { ty_name, idx } => {
-                let Vals { spines, spine_intern_proj, .. } = self;
-                match spine_intern_proj.entry((parent, ty_name, idx)) {
-                    std::collections::hash_map::Entry::Occupied(o) => *o.get(),
-                    std::collections::hash_map::Entry::Vacant(v) => {
-                        let len = spines[parent as usize].len + 1;
-                        let id =
-                            u32::try_from(spines.len()).expect("spine arena overflow");
-                        spines.push(SpineNode { elim, parent, len });
-                        v.insert(id);
-                        id
-                    }
-                }
-            }
-        }
+    /// Extend a spine. Interned, so a spine built twice the same way is the
+    /// same spine.
+    pub(crate) fn spine_snoc(&mut self, parent: SpineId, elim: Elim<'t>) -> S {
+        let Vals { spines, spine_intern_app, spine_intern_proj, .. } = self;
+        let id = match elim {
+            Elim::App(a) => *spine_intern_app
+                .entry((parent, a))
+                .or_insert_with(|| Self::alloc_spine(spines, parent, elim)),
+            Elim::Proj { ty_name, idx } => *spine_intern_proj
+                .entry((parent, ty_name, idx))
+                .or_insert_with(|| Self::alloc_spine(spines, parent, elim)),
+        };
+        S::own(id)
     }
 
     /// The eliminations of a spine, outermost last.
@@ -396,23 +409,18 @@ impl<'t> Vals<'t> {
 
     // ---- interned constructors ----
 
-    pub(crate) fn mk_rigid(&mut self, head: RigidHead<'t>, spine: SpineId) -> ValId {
+    pub(crate) fn mk_rigid(&mut self, head: RigidHead<'t>, spine: SpineId) -> V {
         let Vals { vals, rigid_intern, .. } = self;
-        match rigid_intern.entry((head, spine)) {
-            std::collections::hash_map::Entry::Occupied(o) => *o.get(),
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                let id = u32::try_from(vals.len()).expect("value arena overflow");
-                vals.push(Value::Rigid { head, spine });
-                slot.insert(id);
-                id
-            }
-        }
+        let id = *rigid_intern
+            .entry((head, spine))
+            .or_insert_with(|| Self::alloc(vals, Value::Rigid { head, spine }));
+        V::own(id)
     }
 
     /// The variable standing for a binder opened at `level`. Interned on the
     /// level and the type, so two openings of the same binder are the same
     /// variable and everything built over them coincides.
-    pub(crate) fn mk_bvar(&mut self, level: u32, ty: ValId) -> ValId {
+    pub(crate) fn mk_bvar(&mut self, level: u32, ty: ValId) -> V {
         self.mk_rigid(RigidHead::BVar(level, ty), SPINE_EMPTY)
     }
 
@@ -421,17 +429,12 @@ impl<'t> Vals<'t> {
         name: NamePtr<'t>,
         levels: LevelsPtr<'t>,
         spine: SpineId,
-    ) -> ValId {
+    ) -> V {
         let Vals { vals, unfold_intern, .. } = self;
-        match unfold_intern.entry((name, levels, spine)) {
-            std::collections::hash_map::Entry::Occupied(o) => *o.get(),
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                let id = u32::try_from(vals.len()).expect("value arena overflow");
-                vals.push(Value::Unfold { name, levels, spine, forced: None });
-                slot.insert(id);
-                id
-            }
-        }
+        let id = *unfold_intern
+            .entry((name, levels, spine))
+            .or_insert_with(|| Self::alloc(vals, Value::Unfold { name, levels, spine, forced: None }));
+        V::own(id)
     }
 
     pub(crate) fn mk_lam(
@@ -441,24 +444,15 @@ impl<'t> Vals<'t> {
         binder_type: ExprPtr<'t>,
         env: VEnvId,
         body: ExprPtr<'t>,
-    ) -> ValId {
+    ) -> V {
         let Vals { vals, lam_intern, .. } = self;
-        match lam_intern.entry((binder_type, env, body)) {
-            std::collections::hash_map::Entry::Occupied(o) => *o.get(),
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                let id = u32::try_from(vals.len()).expect("value arena overflow");
-                vals.push(Value::Lam {
-                    binder_name,
-                    binder_style,
-                    binder_type,
-                    domain: None,
-                    env,
-                    body,
-                });
-                slot.insert(id);
-                id
-            }
-        }
+        let id = *lam_intern.entry((binder_type, env, body)).or_insert_with(|| {
+            Self::alloc(
+                vals,
+                Value::Lam { binder_name, binder_style, binder_type, domain: None, env, body },
+            )
+        });
+        V::own(id)
     }
 
     pub(crate) fn mk_pi(
@@ -468,44 +462,27 @@ impl<'t> Vals<'t> {
         domain: ValId,
         env: VEnvId,
         body: ExprPtr<'t>,
-    ) -> ValId {
+    ) -> V {
         let Vals { vals, pi_intern, .. } = self;
-        match pi_intern.entry((domain, env, body)) {
-            std::collections::hash_map::Entry::Occupied(o) => *o.get(),
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                let id = u32::try_from(vals.len()).expect("value arena overflow");
-                vals.push(Value::Pi { binder_name, binder_style, domain, env, body });
-                slot.insert(id);
-                id
-            }
-        }
+        let id = *pi_intern
+            .entry((domain, env, body))
+            .or_insert_with(|| Self::alloc(vals, Value::Pi { binder_name, binder_style, domain, env, body }));
+        V::own(id)
     }
 
-    pub(crate) fn mk_sort(&mut self, level: LevelPtr<'t>) -> ValId {
-        if let Some(&v) = self.sort_intern.get(&level) {
-            return v;
-        }
-        let v = self.alloc(Value::Sort { level });
-        self.sort_intern.insert(level, v);
-        v
+    pub(crate) fn mk_sort(&mut self, level: LevelPtr<'t>) -> V {
+        let Vals { vals, sort_intern, .. } = self;
+        V::own(*sort_intern.entry(level).or_insert_with(|| Self::alloc(vals, Value::Sort { level })))
     }
 
-    pub(crate) fn mk_nat(&mut self, ptr: BigUintPtr<'t>) -> ValId {
-        if let Some(&v) = self.nat_intern.get(&ptr) {
-            return v;
-        }
-        let v = self.alloc(Value::NatLit { ptr });
-        self.nat_intern.insert(ptr, v);
-        v
+    pub(crate) fn mk_nat(&mut self, ptr: BigUintPtr<'t>) -> V {
+        let Vals { vals, nat_intern, .. } = self;
+        V::own(*nat_intern.entry(ptr).or_insert_with(|| Self::alloc(vals, Value::NatLit { ptr })))
     }
 
-    pub(crate) fn mk_str(&mut self, ptr: StringPtr<'t>) -> ValId {
-        if let Some(&v) = self.str_intern.get(&ptr) {
-            return v;
-        }
-        let v = self.alloc(Value::StrLit { ptr });
-        self.str_intern.insert(ptr, v);
-        v
+    pub(crate) fn mk_str(&mut self, ptr: StringPtr<'t>) -> V {
+        let Vals { vals, str_intern, .. } = self;
+        V::own(*str_intern.entry(ptr).or_insert_with(|| Self::alloc(vals, Value::StrLit { ptr })))
     }
 
     /// A thunk interned under `key_env`, the environment projected onto the
@@ -517,31 +494,39 @@ impl<'t> Vals<'t> {
         key_env: VEnvId,
         env: VEnvId,
         expr: ExprPtr<'t>,
-    ) -> ValId {
+    ) -> V {
         let Vals { vals, thunk_intern, .. } = self;
-        match thunk_intern.entry((key_env, expr)) {
-            std::collections::hash_map::Entry::Occupied(o) => *o.get(),
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                let id = u32::try_from(vals.len()).expect("value arena overflow");
-                vals.push(Value::Thunk { env, expr, forced: None });
-                slot.insert(id);
-                id
-            }
-        }
+        let id = *thunk_intern
+            .entry((key_env, expr))
+            .or_insert_with(|| Self::alloc(vals, Value::Thunk { env, expr, forced: None }));
+        V::own(id)
     }
 
-    /// Record what a thunk evaluated to, so it is evaluated once.
+    /// Record what a thunk or a folded constant evaluated to, so it is
+    /// evaluated once. The cell holds a reference to `r`, except when `r` is
+    /// `v` itself, the mark of a constant that does not unfold.
     pub(crate) fn set_forced(&mut self, v: ValId, r: ValId) {
-        match &mut self.vals[v as usize] {
-            Value::Thunk { forced, .. } | Value::Unfold { forced, .. } => *forced = Some(r),
-            _ => {}
+        let old = match &mut self.vals[v as usize] {
+            Value::Thunk { forced, .. } | Value::Unfold { forced, .. } => forced.replace(r),
+            _ => return,
+        };
+        if r != v {
+            rc::inc_val(r);
+        }
+        if let Some(o) = old.filter(|&o| o != v) {
+            rc::dec_val(o);
         }
     }
 
-    /// Record the value of a lambda's domain, so it is evaluated once.
+    /// Record the value of a lambda's domain, so it is evaluated once. The
+    /// lambda holds a reference to it.
     pub(crate) fn set_domain(&mut self, v: ValId, d: ValId) {
         if let Value::Lam { domain, .. } = &mut self.vals[v as usize] {
-            *domain = Some(d);
+            let old = domain.replace(d);
+            rc::inc_val(d);
+            if let Some(o) = old {
+                rc::dec_val(o);
+            }
         }
     }
 }

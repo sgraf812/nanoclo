@@ -331,11 +331,16 @@ pub struct TcCtx<'t, 'p> {
     /// of the context (one context per checking thread).
     pub(crate) rp: crate::closure::CloState<'t>,
     pub(crate) nb: crate::nbe::Vals<'t>,
+    /// The reference counts of `nb` and `rp`. Declared last, so that it is
+    /// dropped after the caches whose handles give their references back.
+    _counts: crate::rc::CountsGuard,
 }
 
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
     pub fn new(export_file: &'t ExportFile<'p>, tdag: &'t mut LeanDag<'t>) -> Self {
-        Self { 
+        let counts = crate::rc::CountsGuard::new();
+        Self {
+            _counts: counts,
             export_file,
             dag: tdag,
             dbj_level_counter: 0u32,
