@@ -185,6 +185,19 @@ pub(crate) struct Vals<'t> {
     pub(crate) wrap_count: u64,
 }
 
+impl Drop for Vals<'_> {
+    /// The caches hold references into the arenas, so they give them back
+    /// while the arenas are still mapped.
+    fn drop(&mut self) {
+        self.clo_val_cache.clear();
+        self.unfold_cache.clear();
+        self.const_val_cache.clear();
+        self.const_ty_cache.clear();
+        self.rec_rule_cache.clear();
+        self.local_cache.clear();
+    }
+}
+
 impl<'t> Vals<'t> {
     pub(crate) fn new() -> Self {
         // The interning tables are built once per checking thread and kept
@@ -195,15 +208,14 @@ impl<'t> Vals<'t> {
         fn pre<K: std::hash::Hash + Eq, V>() -> FxHashMap<K, V> {
             FxHashMap::with_capacity_and_hasher(PRE, Default::default())
         }
-        Vals {
+        let v = Vals {
             vals: crate::arena::Arena::new(),
             // index 0 of each of these arenas is the empty case, so that
             // VENV_NIL and SPINE_EMPTY are valid indices needing no special
             // casing on the lookup paths.
             spines: {
                 let mut s = crate::arena::Arena::new();
-                rc::new_sentinel(rc::Kind::Spine);
-                s.push(SpineNode {
+                s.push(rc::SENTINEL, SpineNode {
                     elim: Elim::Proj {
                         ty_name: crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0),
                         idx: 0,
@@ -245,7 +257,10 @@ impl<'t> Vals<'t> {
             in_conv: 0,
             fuse: false,
             wrap_count: 0,
-        }
+        };
+        rc::register(rc::Kind::Val, &v.vals);
+        rc::register(rc::Kind::Spine, &v.spines);
+        v
     }
 
     /// Drop everything: values name arena positions, so nothing survives a
@@ -300,8 +315,8 @@ impl<'t> Vals<'t> {
         // the caches above held references; the nodes go only after them
         self.vals.truncate(0);
         self.spines.truncate(1);
-        rc::reset(rc::Kind::Val, 0);
-        rc::reset(rc::Kind::Spine, 1);
+        self.spines.set_word(0, rc::SENTINEL);
+        rc::reset();
     }
 
     #[inline]
@@ -325,8 +340,8 @@ impl<'t> Vals<'t> {
             }
             Value::Sort { .. } | Value::NatLit { .. } | Value::StrLit { .. } => {}
         }
-        vals.push(v);
-        rc::new_node(rc::Kind::Val);
+        vals.push(rc::FRESH, v);
+        rc::new_node();
         id
     }
 
@@ -338,8 +353,8 @@ impl<'t> Vals<'t> {
         if let Elim::App(a) = elim {
             rc::inc_val(a);
         }
-        spines.push(SpineNode { elim, parent, len });
-        rc::new_node(rc::Kind::Spine);
+        spines.push(rc::FRESH, SpineNode { elim, parent, len });
+        rc::new_node();
         id
     }
 

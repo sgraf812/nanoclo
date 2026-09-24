@@ -1,5 +1,5 @@
 //! An arena in one reserved range of address space. Node `id` lives at
-//! offset `id * size_of::<T>()`, ids are handed out in order, and a node never
+//! slot `id` of the range, ids are handed out in order, and a node never
 //! moves once pushed. The kernel backs a page of the range with memory only
 //! once a node on it is written, and takes it back when the arena releases it.
 //!
@@ -26,8 +26,17 @@ const KEEP_BYTES: usize = 32 << 20;
 const BLOCK_BITS: usize = 12;
 const BLOCK: usize = 1 << BLOCK_BITS;
 
+/// A node with the word its reference count lives in. The word comes first,
+/// so its address is the slot's, and a count is updated through a raw
+/// pointer to that word alone, never through a reference to the node.
+#[repr(C)]
+struct Slot<T> {
+    word: u32,
+    data: T,
+}
+
 pub(crate) struct Arena<T> {
-    base: *mut MaybeUninit<T>,
+    base: *mut MaybeUninit<Slot<T>>,
     cap: usize,
     len: usize,
     /// One past the highest node written since the range was last released.
@@ -51,7 +60,7 @@ impl<T> Arena<T> {
             let p = unsafe {
                 libc::mmap(
                     std::ptr::null_mut(),
-                    cap * size_of::<T>(),
+                    cap * size_of::<Slot<T>>(),
                     libc::PROT_READ | libc::PROT_WRITE,
                     libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
                     -1,
@@ -72,7 +81,7 @@ impl<T> Arena<T> {
     pub(crate) fn len(&self) -> usize { self.len }
 
     #[inline]
-    pub(crate) fn push(&mut self, x: T) {
+    pub(crate) fn push(&mut self, word: u32, x: T) {
         let i = self.len;
         assert!(i < self.cap, "arena exhausted at {i} nodes");
         if i % BLOCK == 0 {
@@ -87,7 +96,7 @@ impl<T> Arena<T> {
         }
         self.live[i >> BLOCK_BITS] += 1;
         // SAFETY: `i < cap` lies inside the reserved range.
-        unsafe { (*self.base.add(i)).write(x) };
+        unsafe { (*self.base.add(i)).write(Slot { word, data: x }) };
         self.len = i + 1;
         self.high = self.high.max(self.len);
     }
@@ -107,7 +116,7 @@ impl<T> Arena<T> {
         if needs_drop::<T>() {
             unreachable!("released blocks hold only nodes without drop code");
         }
-        let bytes = BLOCK * size_of::<T>();
+        let bytes = BLOCK * size_of::<Slot<T>>();
         // SAFETY: block `b` lies inside the reserved range, is page-aligned
         // since `bytes` is a multiple of 4096, and holds no live node; the
         // kernel zero-fills it if it is touched again.
@@ -121,6 +130,26 @@ impl<T> Arena<T> {
             .filter(|&b| !self.released[b])
             .map(|b| b * BLOCK..((b + 1) * BLOCK).min(self.len))
     }
+
+    /// The count word of node `i`.
+    #[inline]
+    pub(crate) fn word(&self, i: usize) -> u32 {
+        assert!(self.present(i), "arena index {i} out of range {} or released", self.len);
+        // SAFETY: slot `i < len` was written by `push`.
+        unsafe { *std::ptr::addr_of!((*(*self.base.add(i)).as_ptr()).word) }
+    }
+
+    #[inline]
+    pub(crate) fn set_word(&mut self, i: usize, w: u32) {
+        assert!(self.present(i), "arena index {i} out of range {} or released", self.len);
+        // SAFETY: as in `word`.
+        unsafe { *std::ptr::addr_of_mut!((*(*self.base.add(i)).as_mut_ptr()).word) = w };
+    }
+
+    /// The address of node 0's word and the distance between two nodes'
+    /// words, for updating counts from where the arena is out of reach. The
+    /// range never moves while the arena lives.
+    pub(crate) fn words(&self) -> (*mut u32, usize) { (self.base.cast(), size_of::<Slot<T>>()) }
 
     /// Whether node `i` still has its block.
     #[inline]
@@ -145,13 +174,13 @@ impl<T> Arena<T> {
         if let Some(b) = self.released.iter().position(|&r| r) {
             unreachable!("block {b} released below a truncation to {n}");
         }
-        let from = (n * size_of::<T>()).max(KEEP_BYTES).next_multiple_of(self.page);
-        let to = self.high * size_of::<T>();
+        let from = (n * size_of::<Slot<T>>()).max(KEEP_BYTES).next_multiple_of(self.page);
+        let to = self.high * size_of::<Slot<T>>();
         if to > from {
             // SAFETY: `[from, to)` lies inside the reserved range and holds no
             // live node; the kernel zero-fills it when it is touched again.
             unsafe { libc::madvise(self.base.cast::<u8>().add(from).cast(), to - from, libc::MADV_DONTNEED) };
-            self.high = from / size_of::<T>();
+            self.high = from / size_of::<Slot<T>>();
         }
     }
 }
@@ -160,7 +189,7 @@ impl<T> Drop for Arena<T> {
     fn drop(&mut self) {
         self.truncate(0);
         // SAFETY: the range was mapped in `new` with this length.
-        unsafe { libc::munmap(self.base.cast(), self.cap * size_of::<T>()) };
+        unsafe { libc::munmap(self.base.cast(), self.cap * size_of::<Slot<T>>()) };
     }
 }
 
@@ -169,8 +198,9 @@ impl<T> Index<usize> for Arena<T> {
     #[inline]
     fn index(&self, i: usize) -> &T {
         assert!(self.present(i), "arena index {i} out of range {} or released", self.len);
-        // SAFETY: every slot below `len` was written by `push`.
-        unsafe { (*self.base.add(i)).assume_init_ref() }
+        // SAFETY: every slot below `len` was written by `push`; the reference
+        // covers the node's data, not its word.
+        unsafe { &*std::ptr::addr_of!((*(*self.base.add(i)).as_ptr()).data) }
     }
 }
 
@@ -179,6 +209,6 @@ impl<T> IndexMut<usize> for Arena<T> {
     fn index_mut(&mut self, i: usize) -> &mut T {
         assert!(self.present(i), "arena index {i} out of range {} or released", self.len);
         // SAFETY: as in `index`; `&mut self` makes the access exclusive.
-        unsafe { (*self.base.add(i)).assume_init_mut() }
+        unsafe { &mut *std::ptr::addr_of_mut!((*(*self.base.add(i)).as_mut_ptr()).data) }
     }
 }

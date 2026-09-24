@@ -18,13 +18,19 @@
 //! The count saturates at `COUNT_MAX`, and a saturated node lives until the
 //! end of the declaration. A word of zero marks a slot with no node.
 //!
-//! The counts live apart from the nodes, in a store that only this module
-//! touches, so a handle can update its count while the evaluator holds the
-//! arenas mutably. Each checker context installs its own store for as long as
-//! it lives; a context created while another one is alive stacks on top.
+//! A count word lives in its node's slot (`arena.rs`). A handle updates it
+//! through a raw pointer to the word alone, computed from the arena's base,
+//! so it never overlaps a reference the evaluator holds into a node. Each
+//! checker context registers its arenas' bases here for as long as it lives;
+//! a context created while another one is alive stacks on top.
 
 use crate::arena::Arena;
 use std::cell::{Cell, RefCell};
+
+/// The word of a new node, which has no holders yet.
+pub(crate) const FRESH: u32 = ALLOC;
+/// The word of a sentinel, held for as long as its context lives.
+pub(crate) const SENTINEL: u32 = ALLOC | 1;
 
 const ALLOC: u32 = 1 << 31;
 const COUNT_BITS: u32 = 12;
@@ -42,9 +48,8 @@ pub(crate) enum Kind {
 }
 
 pub(crate) struct Counts {
-    pub(crate) vals: Arena<u32>,
-    pub(crate) spines: Arena<u32>,
-    pub(crate) envs: Arena<u32>,
+    /// For each kind, node 0's word and the distance between two words.
+    words: [(*mut u32, usize); 3],
     /// Sweeps so far, modulo `2^STAMP_BITS`.
     epoch: u32,
     /// Allocations since the last sweep, and how many the next one waits for.
@@ -53,13 +58,15 @@ pub(crate) struct Counts {
 }
 
 impl Counts {
+    /// The count word of node `id` of kind `k`. A released block reads as
+    /// zeros, so its words show no `ALLOC`.
     #[inline]
-    fn of(&mut self, k: Kind) -> &mut Arena<u32> {
-        match k {
-            Kind::Val => &mut self.vals,
-            Kind::Spine => &mut self.spines,
-            Kind::Env => &mut self.envs,
-        }
+    fn word(&self, k: Kind, id: u32) -> *mut u32 {
+        let (base, stride) = self.words[k as usize];
+        assert!(!base.is_null(), "{k:?} arena not registered");
+        // SAFETY: ids come from the arena's pushes, so the word lies inside
+        // its reserved range.
+        unsafe { base.cast::<u8>().add(id as usize * stride).cast() }
     }
 }
 
@@ -77,9 +84,7 @@ pub(crate) struct CountsGuard(());
 impl CountsGuard {
     pub(crate) fn new() -> Self {
         let mut c = Box::new(Counts {
-            vals: Arena::new(),
-            spines: Arena::new(),
-            envs: Arena::new(),
+            words: [(std::ptr::null_mut(), 0); 3],
             epoch: 0,
             allocs: 0,
             next_sweep: SWEEP_MIN,
@@ -159,29 +164,16 @@ handle!(V, Kind::Val, "A value held by the evaluator.");
 handle!(S, Kind::Spine, "A spine held by the evaluator.");
 handle!(E, Kind::Env, "An environment held by the evaluator.");
 
-/// The word of a slot holding a node with `count` holders.
+/// Make the counts of arena `a` reachable for kind `k`.
+pub(crate) fn register<T>(k: Kind, a: &Arena<T>) { counts().words[k as usize] = a.words() }
+
+/// Count one allocation towards the next sweep.
 #[inline]
-fn word(count: u32) -> u32 { ALLOC | count }
+pub(crate) fn new_node() { counts().allocs += 1 }
 
-/// Record a new node of kind `k`, with no holders yet.
-#[inline]
-pub(crate) fn new_node(k: Kind) {
+/// Forget the epochs and pins of the declaration that ended.
+pub(crate) fn reset() {
     let c = counts();
-    c.allocs += 1;
-    c.of(k).push(word(0))
-}
-
-/// Record a sentinel of kind `k`, held for as long as the context lives.
-pub(crate) fn new_sentinel(k: Kind) { counts().of(k).push(word(1)) }
-
-/// Forget every node of kind `k` past the first `n`, which are sentinels, and
-/// the epochs and pins with them.
-pub(crate) fn reset(k: Kind, n: usize) {
-    let c = counts();
-    c.of(k).truncate(n);
-    for i in 0..n {
-        c.of(k)[i] = word(1);
-    }
     c.epoch = 0;
     c.allocs = 0;
     c.next_sweep = SWEEP_MIN;
@@ -191,14 +183,15 @@ pub(crate) fn reset(k: Kind, n: usize) {
 /// Whether node `id` of kind `k` is live or a zombie.
 #[inline]
 pub(crate) fn alive(k: Kind, id: u32) -> bool {
-    let a = counts().of(k);
-    a.present(id as usize) && a[id as usize] & ALLOC != 0
+    // SAFETY: see `Counts::word`.
+    unsafe { *counts().word(k, id) & ALLOC != 0 }
 }
 
 /// Take a reference to node `id`; a zombie becomes live again.
 #[inline]
 pub(crate) fn inc(k: Kind, id: u32) {
-    let w = &mut counts().of(k)[id as usize];
+    // SAFETY: see `Counts::word`; no reference to the word exists.
+    let w = unsafe { &mut *counts().word(k, id) };
     assert!(*w & ALLOC != 0, "{k:?} {id}: reference to a freed node");
     if *w & COUNT_MAX != COUNT_MAX {
         *w += 1;
@@ -211,7 +204,8 @@ pub(crate) fn inc(k: Kind, id: u32) {
 pub(crate) fn release(k: Kind, id: u32) {
     let c = counts();
     let epoch = c.epoch;
-    let w = &mut c.of(k)[id as usize];
+    // SAFETY: as in `inc`.
+    let w = unsafe { &mut *c.word(k, id) };
     let count = *w & COUNT_MAX;
     if count == COUNT_MAX {
         return;
@@ -224,7 +218,8 @@ pub(crate) fn release(k: Kind, id: u32) {
 /// this leaves `id` without holders.
 #[inline]
 fn drop_child(c: &mut Counts, k: Kind, id: u32) -> Option<u32> {
-    let w = &mut c.of(k)[id as usize];
+    // SAFETY: as in `inc`.
+    let w = unsafe { &mut *c.word(k, id) };
     let count = *w & COUNT_MAX;
     if count == COUNT_MAX {
         return None;
@@ -275,20 +270,24 @@ impl<'x, 't: 'x, 'p: 't> crate::tc::TypeChecker<'x, 't, 'p> {
         let mut work: Vec<(Kind, u32)> = Vec::new();
         let mut children: Vec<(Kind, u32)> = Vec::new();
         let mut zombies: Vec<(Kind, u32)> = Vec::new();
-        for k in [Kind::Val, Kind::Spine, Kind::Env] {
-            let a = c.of(k);
-            for range in a.present_ranges().collect::<Vec<_>>() {
+        fn scan<T>(a: &Arena<T>, k: Kind, stale: &impl Fn(u32) -> bool, out: &mut Vec<(Kind, u32)>) {
+            for range in a.present_ranges() {
                 for i in range {
-                    let w = a[i];
+                    let w = a.word(i);
                     if w & ALLOC != 0 && w & COUNT_MAX == 0 && stale((w >> COUNT_BITS) & STAMP_MASK) {
-                        zombies.push((k, i as u32));
+                        out.push((k, i as u32));
                     }
                 }
             }
         }
+        scan(&self.ctx.nb.vals, Kind::Val, &stale, &mut zombies);
+        scan(&self.ctx.nb.spines, Kind::Spine, &stale, &mut zombies);
+        scan(&self.ctx.rp.envs, Kind::Env, &stale, &mut zombies);
         for (k, id) in zombies {
             // an earlier cascade in this sweep may have freed it already
-            if !alive(k, id) || c.of(k)[id as usize] & COUNT_MAX != 0 {
+            // SAFETY: see `Counts::word`.
+            let w = unsafe { *c.word(k, id) };
+            if w & ALLOC == 0 || w & COUNT_MAX != 0 {
                 continue;
             }
             work.push((k, id));
@@ -350,12 +349,20 @@ impl<'x, 't: 'x, 'p: 't> crate::tc::TypeChecker<'x, 't, 'p> {
                         }
                     }
                 }
-                c.of(k)[id as usize] = 0;
-                c.of(k).free(id as usize);
+                let i = id as usize;
                 match k {
-                    Kind::Val => self.ctx.nb.vals.free(id as usize),
-                    Kind::Spine => self.ctx.nb.spines.free(id as usize),
-                    Kind::Env => self.ctx.rp.envs.free(id as usize),
+                    Kind::Val => {
+                        self.ctx.nb.vals.set_word(i, 0);
+                        self.ctx.nb.vals.free(i);
+                    }
+                    Kind::Spine => {
+                        self.ctx.nb.spines.set_word(i, 0);
+                        self.ctx.nb.spines.free(i);
+                    }
+                    Kind::Env => {
+                        self.ctx.rp.envs.set_word(i, 0);
+                        self.ctx.rp.envs.free(i);
+                    }
                 }
                 for &(ck, cid) in &children {
                     let Some(stamp) = drop_child(c, ck, cid) else { continue };
@@ -367,10 +374,9 @@ impl<'x, 't: 'x, 'p: 't> crate::tc::TypeChecker<'x, 't, 'p> {
         }
         // the next sweep waits for as many allocations as half the slots
         // still present, so that scanning stays in proportion to allocating
-        let present: usize = [Kind::Val, Kind::Spine, Kind::Env]
-            .into_iter()
-            .map(|k| c.of(k).present_ranges().map(|r| r.len()).sum::<usize>())
-            .sum();
+        let present: usize = self.ctx.nb.vals.present_ranges().map(|r| r.len()).sum::<usize>()
+            + self.ctx.nb.spines.present_ranges().map(|r| r.len()).sum::<usize>()
+            + self.ctx.rp.envs.present_ranges().map(|r| r.len()).sum::<usize>();
         c.next_sweep = SWEEP_MIN.max(present as u64 / 2);
     }
 }
@@ -383,14 +389,13 @@ impl<'t, 'p> crate::util::TcCtx<'t, 'p> {
     pub(crate) fn check_counts(&self) {
         use crate::closure::{Entry, VIEW_BIT};
         use crate::nbe::{Elim, RigidHead, Value};
-        let c = counts();
-        let live = |a: &Arena<u32>, i: usize| a.present(i) && a[i] & ALLOC != 0;
+        fn live<T>(a: &Arena<T>, i: usize) -> bool { a.present(i) && a.word(i) & ALLOC != 0 }
         let mut ev = vec![0u64; self.nb.vals.len()];
         let mut es = vec![0u64; self.nb.spines.len()];
         let mut ee = vec![0u64; self.rp.envs.len()];
         es[0] += 1;
         ee[0] += 1;
-        for i in (0..self.nb.vals.len()).filter(|&i| live(&c.vals, i)) {
+        for i in (0..self.nb.vals.len()).filter(|&i| live(&self.nb.vals, i)) {
             match self.nb.vals[i] {
                 Value::Rigid { head, spine } => {
                     if let RigidHead::BVar(_, ty) = head {
@@ -423,14 +428,14 @@ impl<'t, 'p> crate::util::TcCtx<'t, 'p> {
                 Value::Sort { .. } | Value::NatLit { .. } | Value::StrLit { .. } => {}
             }
         }
-        for i in (1..self.nb.spines.len()).filter(|&i| live(&c.spines, i)) {
+        for i in (1..self.nb.spines.len()).filter(|&i| live(&self.nb.spines, i)) {
             let n = &self.nb.spines[i];
             es[n.parent as usize] += 1;
             if let Elim::App(a) = n.elim {
                 ev[a as usize] += 1;
             }
         }
-        for i in (1..self.rp.envs.len()).filter(|&i| live(&c.envs, i)) {
+        for i in (1..self.rp.envs.len()).filter(|&i| live(&self.rp.envs, i)) {
             let n = &self.rp.envs[i];
             ee[n.parent as usize] += 1;
             match n.entry {
@@ -441,12 +446,12 @@ impl<'t, 'p> crate::util::TcCtx<'t, 'p> {
         }
         let nb = &self.nb;
         for (&k, &r) in &nb.iota_cache {
-            if let Some(r) = r.filter(|&r| r != k && live(&c.vals, k as usize)) {
+            if let Some(r) = r.filter(|&r| r != k && live(&self.nb.vals, k as usize)) {
                 ev[r as usize] += 1;
             }
         }
         for (&k, &t) in &nb.type_cache {
-            if t != k && live(&c.vals, k as usize) {
+            if t != k && live(&self.nb.vals, k as usize) {
                 ev[t as usize] += 1;
             }
         }
@@ -456,13 +461,18 @@ impl<'t, 'p> crate::util::TcCtx<'t, 'p> {
             ev[v.id() as usize] += 1;
         }
         let mut surplus = 0u64;
-        for (what, stored, expected) in [("value", &c.vals, &ev), ("spine", &c.spines, &es), ("env", &c.envs, &ee)] {
+        let words: [(&str, &dyn Fn(usize) -> Option<u32>, &Vec<u64>); 3] = [
+            ("value", &|i| live(&self.nb.vals, i).then(|| self.nb.vals.word(i)), &ev),
+            ("spine", &|i| live(&self.nb.spines, i).then(|| self.nb.spines.word(i)), &es),
+            ("env", &|i| live(&self.rp.envs, i).then(|| self.rp.envs.word(i)), &ee),
+        ];
+        for (what, stored, expected) in words {
             for (i, &e) in expected.iter().enumerate() {
-                if !live(stored, i) {
+                let Some(w) = stored(i) else {
                     assert!(e == 0, "{what} {i}: freed with {e} live holders");
                     continue;
-                }
-                let s = u64::from(stored[i] & COUNT_MAX);
+                };
+                let s = u64::from(w & COUNT_MAX);
                 if s == u64::from(COUNT_MAX) {
                     continue;
                 }

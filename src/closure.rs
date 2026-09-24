@@ -191,11 +191,10 @@ pub fn ctrs_report() -> String {
 
 impl<'t> CloState<'t> {
     pub(crate) fn new() -> Self {
-        CloState {
+        let c = CloState {
             envs: {
                 let mut e = crate::arena::Arena::new();
-                crate::rc::new_sentinel(crate::rc::Kind::Env);
-                e.push(EnvNode { entry: Entry::Val(crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0), 0), parent: 0, len: 0, next_level: 0, jump: 0 });
+                e.push(crate::rc::SENTINEL, EnvNode { entry: Entry::Val(crate::util::Ptr::from(crate::util::DagMarker::ExportFile, 0), 0), parent: 0, len: 0, next_level: 0, jump: 0 });
                 e
             },
             env_intern: new_fx_hash_map(),
@@ -220,7 +219,9 @@ impl<'t> CloState<'t> {
             fuse_unfoldable: new_fx_hash_map(),
             g_inst_ty: new_fx_hash_map(),
             ctrs: [0; 26],
-        }
+        };
+        crate::rc::register(crate::rc::Kind::Env, &c.envs);
+        c
     }
 
     /// Accumulate this context's counters into the process-wide totals.
@@ -243,7 +244,8 @@ impl<'t> CloState<'t> {
             }
         }
         self.envs.truncate(1);
-        crate::rc::reset(crate::rc::Kind::Env, 1);
+        self.envs.set_word(0, crate::rc::SENTINEL);
+        crate::rc::reset();
         rm(&mut self.env_intern);
         rm(&mut self.infer_cache_check);
         rm(&mut self.infer_cache_only);
@@ -388,8 +390,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let id = u32::try_from(envs.len()).unwrap();
                 debug_assert!(id < VIEW_BIT);
                 hold_entry(env, Entry::V(v));
-                envs.push(EnvNode { entry: Entry::V(v), parent: env, len, next_level, jump });
-                crate::rc::new_node(crate::rc::Kind::Env);
+                envs.push(crate::rc::FRESH, EnvNode { entry: Entry::V(v), parent: env, len, next_level, jump });
+                crate::rc::new_node();
                 id
         });
         crate::rc::E::own(id)
@@ -445,8 +447,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let id = u32::try_from(self.ctx.rp.envs.len()).unwrap();
         debug_assert!(id < VIEW_BIT);
         hold_entry(env, entry);
-        self.ctx.rp.envs.push(EnvNode { entry, parent: env, len, next_level, jump });
-        crate::rc::new_node(crate::rc::Kind::Env);
+        self.ctx.rp.envs.push(crate::rc::FRESH, EnvNode { entry, parent: env, len, next_level, jump });
+        crate::rc::new_node();
         crate::rc::pin_env(id);
         crate::rc::make_room(&mut self.ctx.rp.env_intern, |_, e| crate::rc::alive(crate::rc::Kind::Env, *e));
         self.ctx.rp.env_intern.insert(key, id);
