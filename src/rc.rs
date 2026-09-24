@@ -167,9 +167,10 @@ handle!(E, Kind::Env, "An environment held by the evaluator.");
 /// Make the counts of arena `a` reachable for kind `k`.
 pub(crate) fn register<T>(k: Kind, a: &Arena<T>) { counts().words[k as usize] = a.words() }
 
+pub static OPS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
 /// Count one allocation towards the next sweep.
-#[inline]
-pub(crate) fn new_node() { counts().allocs += 1 }
+pub(crate) fn new_node() { OPS[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed); counts().allocs += 1 }
 
 /// Forget the epochs and pins of the declaration that ended.
 pub(crate) fn reset() {
@@ -190,6 +191,7 @@ pub(crate) fn alive(k: Kind, id: u32) -> bool {
 /// Take a reference to node `id`; a zombie becomes live again.
 #[inline]
 pub(crate) fn inc(k: Kind, id: u32) {
+    OPS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // SAFETY: see `Counts::word`; no reference to the word exists.
     let w = unsafe { &mut *counts().word(k, id) };
     assert!(*w & ALLOC != 0, "{k:?} {id}: reference to a freed node");
@@ -202,6 +204,7 @@ pub(crate) fn inc(k: Kind, id: u32) {
 /// stamp. A node this leaves without holders becomes a zombie.
 #[inline]
 pub(crate) fn release(k: Kind, id: u32) {
+    OPS[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let c = counts();
     let epoch = c.epoch;
     // SAFETY: as in `inc`.
@@ -541,4 +544,43 @@ where
         }
         std::collections::hash_map::Entry::Vacant(v) => *v.insert(mk()),
     }
+}
+
+/// A value the evaluator uses: owned, or borrowed from a holder that keeps
+/// it for as long as the borrow is used. A borrow costs no count update. It
+/// names a value held by the caller's argument (its forced cell, its domain,
+/// a cache entry the argument owns) or by a cache that lives for the whole
+/// declaration; a result kept past the life of what it was borrowed from
+/// becomes owned with `into_owned`.
+pub(crate) enum R {
+    Owned(V),
+    Borrowed(u32),
+}
+
+impl R {
+    #[inline]
+    pub(crate) fn id(&self) -> u32 {
+        match self {
+            R::Owned(v) => v.id(),
+            R::Borrowed(id) => *id,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn into_owned(self) -> V {
+        match self {
+            R::Owned(v) => v,
+            R::Borrowed(id) => V::own(id),
+        }
+    }
+}
+
+impl From<V> for R {
+    #[inline]
+    fn from(v: V) -> R { R::Owned(v) }
+}
+
+impl PartialEq for R {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool { self.id() == other.id() }
 }

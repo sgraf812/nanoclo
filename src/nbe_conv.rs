@@ -17,7 +17,7 @@
 use crate::tc::SPEC_BUDGET;
 use crate::env::{Declar, ReducibilityHint};
 use crate::nbe::{ConstKind, Elim, RigidHead, SpineId, ValId, Value};
-use crate::rc::{self, Kind, V};
+use crate::rc::{self, Kind, R, V};
 use crate::tc::TypeChecker;
 use crate::util::NamePtr;
 
@@ -358,8 +358,8 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if self.nb_proof_irrel(depth, x, y) {
             return true;
         }
-        let x2 = self.nb_iota(depth, x).unwrap_or_else(|| V::own(x));
-        let y2 = self.nb_iota(depth, y).unwrap_or_else(|| V::own(y));
+        let x2 = self.nb_iota(depth, x).unwrap_or(R::Borrowed(x));
+        let y2 = self.nb_iota(depth, y).unwrap_or(R::Borrowed(y));
         if x2.id() != x || y2.id() != y {
             let r = self.nb_unify::<true>(depth, x2.id(), y2.id());
             self.ctx.nb.probe_escalate = 0;

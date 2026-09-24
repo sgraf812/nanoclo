@@ -504,7 +504,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if let Some(v) = self.ctx.nb.clo_val_cache.get(&(c.e, c.env)) {
             return v.clone();
         }
-        let v = self.nb_eval(0, c.env, c.e);
+        let v = self.nb_eval(0, c.env, c.e).into_owned();
         self.ctx.nb.clo_val_cache.insert((c.e, c.env), v.clone());
         v
     }

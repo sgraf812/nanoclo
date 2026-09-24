@@ -16,7 +16,7 @@ use crate::expr::Expr;
 use crate::nbe::{
     ConstKind, Elim, RigidHead, SpineId, ValId, VEnvId, Value, SPINE_EMPTY, VENV_NIL,
 };
-use crate::rc::{self, Kind, S, V};
+use crate::rc::{self, Kind, R, S, V};
 
 /// Whether a memo entry from value `k` to `r` names only live values.
 fn live_pair(k: ValId, r: Option<ValId>) -> bool {
@@ -57,7 +57,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// value, a delayed argument evaluates through its thunk's forced cell,
     /// and an unfolded constant through its `Unfold` node, so the sharing an
     /// evaluation memo would buy already lives in the values themselves.
-    pub(crate) fn nb_eval(&mut self, depth: u32, env: VEnvId, e: ExprPtr<'t>) -> V {
+    /// A variable's value is borrowed from `env`, which the caller holds, and
+    /// a constant's or a local's from the declaration's caches.
+    pub(crate) fn nb_eval(&mut self, depth: u32, env: VEnvId, e: ExprPtr<'t>) -> R {
         if rc::collect_due() {
             self.nb_collect();
         }
@@ -67,14 +69,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             Var { dbj_idx, .. } => {
                 let entry = self.lookup(env, dbj_idx);
                 let v = self.entry_val(entry);
-                self.nb_force(depth, v.id())
+                match v {
+                    R::Borrowed(id) => self.nb_force(depth, id),
+                    R::Owned(v) => self.nb_force(depth, v.id()).into_owned().into(),
+                }
             }
             Sort { level, .. } => {
                 let level = self.ctx.simplify(level);
-                self.ctx.nb.mk_sort(level)
+                self.ctx.nb.mk_sort(level).into()
             }
-            NatLit { ptr, .. } => self.ctx.nb.mk_nat(ptr),
-            StringLit { ptr, .. } => self.ctx.nb.mk_str(ptr),
+            NatLit { ptr, .. } => self.ctx.nb.mk_nat(ptr).into(),
+            StringLit { ptr, .. } => self.ctx.nb.mk_str(ptr).into(),
             Local { .. } => self.nb_local(e),
             Const { name, levels, .. } => self.nb_const(name, levels),
             App { .. } => {
@@ -119,21 +124,22 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         f = match head_rigid {
                             Ok(head) => self.ctx.nb.mk_rigid(head, spine.id()),
                             Err((name, levels)) => self.ctx.nb.mk_unfold(name, levels, spine.id()),
-                        };
+                        }
+                        .into();
                         break;
                     }
                     i -= 1;
                     let a = self.nb_delay(depth, env, args[i]);
-                    f = self.nb_apply(depth, f.id(), a.id());
+                    f = self.nb_apply(depth, f.id(), a.id()).into();
                 }
                 f
             }
             Lambda { binder_name, binder_style, binder_type, body, .. } => {
-                self.ctx.nb.mk_lam(binder_name, binder_style, binder_type, env, body)
+                self.ctx.nb.mk_lam(binder_name, binder_style, binder_type, env, body).into()
             }
             Pi { binder_name, binder_style, binder_type, body, .. } => {
                 let domain = self.nb_delay(depth, env, binder_type);
-                self.ctx.nb.mk_pi(binder_name, binder_style, domain.id(), env, body)
+                self.ctx.nb.mk_pi(binder_name, binder_style, domain.id(), env, body).into()
             }
             Let { .. } => {
                 let mut held = None;
@@ -152,7 +158,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             Proj { ty_name, idx, structure, .. } => {
                 let s = self.nb_eval(depth, env, structure);
-                self.nb_proj(depth, ty_name, idx, s.id())
+                self.nb_proj(depth, ty_name, idx, s.id()).into()
             }
         }
     }
@@ -160,13 +166,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Record a subterm without evaluating it. Something already in normal
     /// form is evaluated straight away, since a thunk over it would cost more
     /// than the value.
-    fn nb_delay(&mut self, depth: u32, env: VEnvId, e: ExprPtr<'t>) -> V {
+    fn nb_delay(&mut self, depth: u32, env: VEnvId, e: ExprPtr<'t>) -> R {
         let n = self.ctx.read_expr(e);
         let env = if n.num_loose_bvars() == 0 { VENV_NIL } else { env };
         match n {
             Var { .. } | Sort { .. } | NatLit { .. } | StringLit { .. } | Local { .. }
             | Const { .. } => self.nb_eval(depth, env, e),
-            _ => self.nb_thunk(env, e),
+            _ => self.nb_thunk(env, e).into(),
         }
     }
 
@@ -179,31 +185,33 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
 
     /// The value an environment entry stands for: an evaluated entry is
     /// itself, a delayed one becomes a thunk, an opened binder its neutral.
-    pub(crate) fn entry_val(&mut self, entry: crate::closure::Entry<'t>) -> V {
+    /// The value an entry of an environment the caller holds stands for.
+    pub(crate) fn entry_val(&mut self, entry: crate::closure::Entry<'t>) -> R {
         match entry {
-            crate::closure::Entry::V(v) => V::own(v),
+            crate::closure::Entry::V(v) => R::Borrowed(v),
             crate::closure::Entry::Val(e, env) => {
                 let env = if self.lbr(e) == 0 { crate::nbe::VENV_NIL } else { env };
-                self.nb_thunk(env, e)
+                self.nb_thunk(env, e).into()
             }
             crate::closure::Entry::Neu(fv) => self.nb_local(fv),
         }
     }
 
-    pub(crate) fn nb_local(&mut self, e: ExprPtr<'t>) -> V {
+    pub(crate) fn nb_local(&mut self, e: ExprPtr<'t>) -> R {
         if let Some(v) = self.ctx.nb.local_cache.get(&e) {
-            return v.clone();
+            return R::Borrowed(v.id());
         }
         let v = self.ctx.nb.mk_rigid(RigidHead::Local(e), SPINE_EMPTY);
-        self.ctx.nb.local_cache.insert(e, v.clone());
-        v
+        let id = v.id();
+        self.ctx.nb.local_cache.insert(e, v);
+        R::Borrowed(id)
     }
 
     /// The value denoting a constant: one with a body stays folded, anything
     /// else is a neutral carrying the kind that decides how it reduces.
-    fn nb_const(&mut self, name: NamePtr<'t>, levels: LevelsPtr<'t>) -> V {
+    fn nb_const(&mut self, name: NamePtr<'t>, levels: LevelsPtr<'t>) -> R {
         if let Some(v) = self.ctx.nb.const_val_cache.get(&(name, levels)) {
-            return v.clone();
+            return R::Borrowed(v.id());
         }
         {
             // These two reduce by running compiled code, which a checker
@@ -230,23 +238,26 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             }
             None => self.ctx.nb.mk_rigid(RigidHead::Const(ConstKind::Axiom, name, levels), SPINE_EMPTY),
         };
-        self.ctx.nb.const_val_cache.insert((name, levels), v.clone());
-        v
+        let id = v.id();
+        self.ctx.nb.const_val_cache.insert((name, levels), v);
+        R::Borrowed(id)
     }
 
     /// Force a thunk, remembering the result in it.
-    pub(crate) fn nb_force(&mut self, depth: u32, v: ValId) -> V {
+    /// A thunk's value, borrowed from its forced cell once it has one; any
+    /// other value is itself.
+    pub(crate) fn nb_force(&mut self, depth: u32, v: ValId) -> R {
         match self.ctx.nb.get(v) {
             Value::Thunk { env, expr, forced } => {
                 if let Some(f) = forced {
-                    return V::own(f);
+                    return R::Borrowed(f);
                 }
                 let f = self.nb_eval(depth, env, expr);
-                let f = self.nb_force(depth, f.id());
+                let f = self.nb_force(depth, f.id()).into_owned();
                 self.ctx.nb.set_forced(v, f.id());
-                f
+                f.into()
             }
-            _ => V::own(v),
+            _ => R::Borrowed(v),
         }
     }
 
@@ -255,7 +266,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         match self.ctx.nb.get(f) {
             Value::Lam { env, body, .. } => {
                 let env2 = self.push_entry_v(env, a);
-                self.nb_eval(depth, env2.id(), body)
+                self.nb_eval(depth, env2.id(), body).into_owned()
             }
             Value::Rigid { head, spine } => {
                 let spine = self.ctx.nb.spine_snoc(spine, Elim::App(a));
@@ -308,7 +319,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     if cd.inductive_name == ty_name {
                         let np = usize::from(cd.num_params);
                         if let Some(Elim::App(field)) = self.ctx.nb.spine_get(spine, np + idx) {
-                            return self.nb_force(depth, field);
+                            return self.nb_force(depth, field).into_owned();
                         }
                     }
                 }
@@ -352,15 +363,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     }
 
     /// The domain of a lambda or pi, evaluated once.
-    pub(crate) fn nb_lam_domain(&mut self, depth: u32, v: ValId) -> V {
+    pub(crate) fn nb_lam_domain(&mut self, depth: u32, v: ValId) -> R {
         match self.ctx.nb.get(v) {
             Value::Lam { binder_type, domain, env, .. } => {
                 if let Some(d) = domain {
-                    return V::own(d);
+                    return R::Borrowed(d);
                 }
-                let d = self.nb_eval(depth, env, binder_type);
+                let d = self.nb_eval(depth, env, binder_type).into_owned();
                 self.ctx.nb.set_domain(v, d.id());
-                d
+                d.into()
             }
             Value::Pi { domain, .. } => self.nb_force(depth, domain),
             _ => panic!("nb_lam_domain: not a binder"),
@@ -374,14 +385,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             _ => panic!("nb_open: not a binder"),
         };
         let env2 = self.push_entry_v(env, a);
-        self.nb_eval(depth, env2.id(), body)
+        self.nb_eval(depth, env2.id(), body).into_owned()
     }
 
     // ---- reduction ----
 
     /// Weak head normal form: unfold constants and fire recursors until the
     /// head is stuck.
-    pub(crate) fn nb_whnf(&mut self, depth: u32, v: ValId) -> V {
+    /// The weak head normal form of `v`. A value already in normal form, or
+    /// reached through forced cells, is borrowed; after a step the result is
+    /// owned, since the step's source may be a temporary.
+    pub(crate) fn nb_whnf(&mut self, depth: u32, v: ValId) -> R {
         stacker::maybe_grow(256 * 1024, 16 * 1024 * 1024, || {
             let mut cur = self.nb_force(depth, v);
             loop {
@@ -391,13 +405,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                         if next == cur {
                             return cur;
                         }
-                        cur = self.nb_force(depth, next.id());
+                        let n = self.nb_force(depth, next.id()).into_owned();
+                        cur = n.into();
                     }
                     Value::Rigid { head: RigidHead::Const(k, ..), .. }
                         if matches!(k, ConstKind::Recursor | ConstKind::QuotConst) =>
                     {
                         match self.nb_iota(depth, cur.id()) {
-                            Some(next) => cur = self.nb_force(depth, next.id()),
+                            Some(next) => {
+                                let n = self.nb_force(depth, next.id()).into_owned();
+                                cur = n.into();
+                            }
                             None => return cur,
                         }
                     }
@@ -410,36 +428,36 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     /// Unfold a folded constant application by evaluating the definition's
     /// body and replaying the spine on it. The result is recorded on the
     /// value, so the replay happens once.
-    pub(crate) fn nb_unfold(&mut self, depth: u32, v: ValId) -> V {
+    pub(crate) fn nb_unfold(&mut self, depth: u32, v: ValId) -> R {
         self.nb_unfold_go(depth, v, false)
     }
 
     /// Unfold even a `Nat` primitive that would rather stay folded. Used
     /// where conversion has nothing else left to try.
-    pub(crate) fn nb_unfold_demand(&mut self, depth: u32, v: ValId) -> V {
+    pub(crate) fn nb_unfold_demand(&mut self, depth: u32, v: ValId) -> R {
         let force = self.ctx.nb.probe_depth == 0;
         self.nb_unfold_go(depth, v, force)
     }
 
-    fn nb_unfold_go(&mut self, depth: u32, v: ValId, force: bool) -> V {
+    fn nb_unfold_go(&mut self, depth: u32, v: ValId, force: bool) -> R {
         let Value::Unfold { name, levels, spine, forced } = self.ctx.nb.get(v) else {
-            return V::own(v);
+            return R::Borrowed(v);
         };
         if let Some(f) = forced {
-            return V::own(f);
+            return R::Borrowed(f);
         }
         if self.nat_ext() && self.nb_is_nat_prim(name) {
             if let Some(args) = self.ctx.nb.spine_args(spine) {
                 if let Some(r) = self.nb_nat_red(depth, name, &args, true) {
                     self.ctx.nb.set_forced(v, r.id());
-                    return r;
+                    return r.into();
                 }
                 // `Nat.add`, and its siblings, recurse on their second
                 // argument. Unfolding one whose second argument is a large
                 // literal walks that literal in unary, so the application
                 // stays folded until something demands otherwise.
                 if !force && self.nb_nat_defer(depth, name, &args) {
-                    return V::own(v);
+                    return R::Borrowed(v);
                 }
             }
         }
@@ -451,14 +469,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let Some(head) = self.nb_unfold_const(name, levels) else {
             self.ctx.nb.set_forced(v, v);
-            return V::own(v);
+            return R::Borrowed(v);
         };
         let mut cur = head;
         for elim in self.ctx.nb.spine_to_vec(spine) {
             cur = match elim {
                 Elim::App(a) => self.nb_apply(depth, cur.id(), a),
                 Elim::Proj { ty_name, idx } => self.nb_proj(depth, ty_name, idx, cur.id()),
-            };
+            }
+            .into();
         }
         self.ctx.nb.set_forced(v, cur.id());
         cur
@@ -470,9 +489,9 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         &mut self,
         name: NamePtr<'t>,
         levels: LevelsPtr<'t>,
-    ) -> Option<V> {
+    ) -> Option<R> {
         if let Some(v) = self.ctx.nb.unfold_cache.get(&(name, levels)) {
-            return v.clone();
+            return v.as_ref().map(|v| R::Borrowed(v.id()));
         }
         let r = (|| {
             let (uparams, val) = self.env.get_declar_val(&name)?;
@@ -505,17 +524,20 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             } else {
                 val
             };
-            Some(self.nb_eval(0, VENV_NIL, val))
+            Some(self.nb_eval(0, VENV_NIL, val).into_owned())
         })();
-        self.ctx.nb.unfold_cache.insert((name, levels), r.clone());
-        r
+        let id = r.as_ref().map(V::id);
+        self.ctx.nb.unfold_cache.insert((name, levels), r);
+        id.map(R::Borrowed)
     }
 
     /// Fire a recursor or a quotient eliminator standing at the head of `v`,
     /// or report it stuck. Both answers are recorded on `v`.
-    pub(crate) fn nb_iota(&mut self, depth: u32, v: ValId) -> Option<V> {
+    /// What the recursor application `v`, held by the caller, reduces to;
+    /// a recorded reduct is borrowed from `v`'s entry.
+    pub(crate) fn nb_iota(&mut self, depth: u32, v: ValId) -> Option<R> {
         if let Some(&r) = self.ctx.nb.iota_cache.get(&v) {
-            return r.map(V::own);
+            return r.map(R::Borrowed);
         }
         let r = self.nb_iota_go(depth, v);
         // the entry is an edge from `v`, like a forced cell, and goes with it
@@ -523,7 +545,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             rc::inc_val(x.id());
         }
         self.ctx.nb.iota_cache.insert(v, r.as_ref().map(V::id));
-        r
+        r.map(R::from)
     }
 
     fn nb_iota_go(&mut self, depth: u32, v: ValId) -> Option<V> {
@@ -637,7 +659,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             Some(v) => v.clone(),
             None => {
                 let body = self.ctx.subst_expr_levels(rule.val, rec.info.uparams, levels);
-                let v = self.nb_eval(0, VENV_NIL, body);
+                let v = self.nb_eval(0, VENV_NIL, body).into_owned();
                 self.ctx.nb.rec_rule_cache.insert((rule.val, levels), v.clone());
                 v
             }
@@ -722,7 +744,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     pub(crate) fn nb_str_to_ctor(&mut self, depth: u32, s: StringPtr<'t>) -> Option<V> {
         let e = self.ctx.str_lit_to_constructor(s)?;
         let v = self.nb_eval(depth, VENV_NIL, e);
-        Some(self.nb_whnf(depth, v.id()))
+        Some(self.nb_whnf(depth, v.id()).into_owned())
     }
 
     /// The K rule: a proof of an inductive proposition with one nullary
@@ -1004,14 +1026,14 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     if Some(name) == nc.nat_succ && self.ctx.nb.spine_len(spine) == 1 {
                         if let Some(Elim::App(a)) = self.ctx.nb.spine_get(spine, 0) {
                             succs += 1;
-                            cur = self.nb_force(depth, a);
+                            cur = self.nb_force(depth, a).into_owned().into();
                             continue;
                         }
                     }
                     return None;
                 }
                 Value::Unfold { forced: Some(f), .. } if f != cur.id() => {
-                    cur = V::own(f);
+                    cur = V::own(f).into();
                 }
                 Value::Unfold { .. }
                 | Value::Rigid { head: RigidHead::Const(ConstKind::Recursor, ..), .. }
@@ -1019,11 +1041,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     if !deep || self.nb_is_open(depth, cur.id()) {
                         return None;
                     }
-                    let f = self.nb_whnf(depth, cur.id());
-                    if f == cur {
+                    let f = self.nb_whnf(depth, cur.id()).into_owned();
+                    if f.id() == cur.id() {
                         return None;
                     }
-                    cur = f;
+                    cur = f.into();
                 }
                 _ => return None,
             }
@@ -1119,10 +1141,11 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         out
     }
 
-    pub(crate) fn nb_type(&mut self, depth: u32, v: ValId) -> V {
+    /// The type of `v`, borrowed from the entry of the value `v` forces to.
+    pub(crate) fn nb_type(&mut self, depth: u32, v: ValId) -> R {
         let v = self.nb_force(depth, v);
         if let Some(&t) = self.ctx.nb.type_cache.get(&v.id()) {
-            return V::own(t);
+            return R::Borrowed(t);
         }
         let t = self.nb_type_go(depth, v.id());
         // an edge from `v`, which goes with it
@@ -1130,7 +1153,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             rc::inc_val(t.id());
         }
         self.ctx.nb.type_cache.insert(v.id(), t.id());
-        t
+        t.into()
     }
 
     fn nb_type_go(&mut self, depth: u32, v: ValId) -> V {
@@ -1172,7 +1195,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 let Local { binder_type, .. } = self.ctx.read_expr(e) else {
                     panic!("nb_head_type: not a local")
                 };
-                self.nb_eval(depth, VENV_NIL, binder_type)
+                self.nb_eval(depth, VENV_NIL, binder_type).into_owned()
             }
             RigidHead::Const(_, n, ls) => self.nb_const_type(n, ls),
         }
@@ -1186,7 +1209,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let info = *self.env.get_declar(&name).expect("nb_const_type: unknown constant").info();
         let ty = self.ctx.subst_expr_levels(info.ty, info.uparams, levels);
-        let v = self.nb_eval(0, VENV_NIL, ty);
+        let v = self.nb_eval(0, VENV_NIL, ty).into_owned();
         self.ctx.nb.const_ty_cache.insert((name, levels), v.clone());
         v
     }
@@ -1244,7 +1267,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         let ctor_name = *ind.all_ctor_names.first()?;
         let ctor_info = *self.env.get_declar(&ctor_name)?.info();
         let ctor_ty = self.ctx.subst_expr_levels(ctor_info.ty, ctor_info.uparams, ind_levels);
-        let mut cur = self.nb_eval(depth, VENV_NIL, ctor_ty);
+        let mut cur = self.nb_eval(depth, VENV_NIL, ctor_ty).into_owned();
         for i in 0..num_params {
             let cur_f = self.nb_whnf(depth, cur.id());
             if !matches!(self.ctx.nb.get(cur_f.id()), Value::Pi { .. }) {
@@ -1262,7 +1285,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         }
         let cur_f = self.nb_whnf(depth, cur.id());
         match self.ctx.nb.get(cur_f.id()) {
-            Value::Pi { domain, .. } => Some(self.nb_force(depth, domain)),
+            Value::Pi { domain, .. } => Some(self.nb_force(depth, domain).into_owned()),
             _ => None,
         }
     }
