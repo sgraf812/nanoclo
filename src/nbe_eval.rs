@@ -245,12 +245,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             Value::Rigid { head, spine } => {
                 let spine = self.ctx.nb.spine_snoc(spine, Elim::App(a));
                 // `Nat.succ` of a literal is a literal, so a chain of them
-                // does not grow a unary spine.
+                // does not grow a unary spine. A `Nat.succ` built here thus
+                // never has a literal below it, and only `a` itself is read.
                 if let RigidHead::Const(ConstKind::Ctor, name, _) = head {
                     if self.nat_ext() && Some(name) == self.ctx.export_file.name_cache.nat_succ {
-                        if let Some(n) = self.nb_bignum(depth, a, false) {
-                            if let Some(p) = self.ctx.alloc_bignum(n + 1u8) {
-                                return self.ctx.nb.mk_nat(p);
+                        let a = self.nb_force(depth, a);
+                        if let Value::NatLit { ptr } = self.ctx.nb.get(a) {
+                            if let Some(n) = self.ctx.read_bignum(ptr).cloned() {
+                                if let Some(p) = self.ctx.alloc_bignum(n + 1u8) {
+                                    return self.ctx.nb.mk_nat(p);
+                                }
                             }
                         }
                     }
