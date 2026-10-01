@@ -57,6 +57,18 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         r
     }
 
+    /// `nb_conv` outside the budget of any enclosing probe. Evaluation
+    /// records what it computes, so a comparison it runs must return the
+    /// exact answer, which an exhausted probe does not.
+    pub(crate) fn nb_conv_unbudgeted(&mut self, depth: u32, x: ValId, y: ValId) -> bool {
+        let nb = &mut self.ctx.nb;
+        let saved = (std::mem::take(&mut nb.probe_depth), nb.probe_fuel, nb.probe_aborted);
+        let r = self.nb_conv(depth, x, y);
+        let nb = &mut self.ctx.nb;
+        (nb.probe_depth, nb.probe_fuel, nb.probe_aborted) = saved;
+        r
+    }
+
     fn nb_unify<const RIGID: bool>(&mut self, depth: u32, x: ValId, y: ValId) -> bool {
         self.ctx.rp.ctrs[11] += 1;
         let x = self.nb_force(depth, x);

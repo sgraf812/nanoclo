@@ -760,7 +760,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             new_ctor = self.nb_apply(depth, new_ctor, a);
         }
         let new_ty = self.nb_type(depth, new_ctor);
-        if !self.nb_conv(depth, major_ty, new_ty) {
+        if !self.nb_conv_unbudgeted(depth, major_ty, new_ty) {
             return None;
         }
         Some(new_ctor)
