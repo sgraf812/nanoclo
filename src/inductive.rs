@@ -1690,10 +1690,24 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                     let old = original.rec_rules[i];
                     let new = restored.rec_rules[i];
                     assert_eq!(old.ctor_name, new.ctor_name);
+                    // Iota reduction uses this count to separate parameters from fields;
+                    // restoring nested must preserve the reconstructed field count.
+                    assert_eq!(
+                        old.ctor_telescope_size_wo_params,
+                        new.ctor_telescope_size_wo_params,
+                        "recursor rule field count mismatch for {:?} in {:?}",
+                        self.ctx.debug_print(old.ctor_name),
+                        self.ctx.debug_print(resolved_rec_name),
+                    );
                     self.assert_def_eq(old.val, new.val);
                 }
             }
-            _ => {}
+            // A recursor moved to a later block is hidden by the environment
+            // cutoff; we must find it within the current cutoff.
+            _ => panic!(
+                "expected exported recursor {:?} within the inductive block's environment",
+                self.ctx.debug_print(resolved_rec_name),
+            ),
         }
     }
 
