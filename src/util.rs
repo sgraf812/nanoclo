@@ -7,7 +7,7 @@ use crate::tc::TypeChecker;
 use crate::unique_hasher::UniqueHasher;
 use indexmap::{IndexMap, IndexSet};
 use num_bigint::BigUint;
-use num_traits::{ Pow, identities::Zero };
+use num_traits::identities::Zero;
 use num_integer::Integer;
 use rustc_hash::FxHasher;
 use std::borrow::Cow;
@@ -168,16 +168,18 @@ pub(crate) fn nat_xor(x: &BigUint, y: &BigUint) -> BigUint {
 
 
 
-/// Used by `src/tests/natlit.rs`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn nat_shl(x: BigUint, y: BigUint) -> BigUint {
-    x * BigUint::from(2u8).pow(y)
+    if x.is_zero() {
+        return x;
+    }
+    x << u64::try_from(&y).expect("nat_shl: shift count exceeds u64::MAX")
 }
 
-/// Used by `src/tests/natlit.rs`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn nat_shr(x: BigUint, y: BigUint) -> BigUint {
-    x / BigUint::from(2u8).pow(y)
+    if y >= BigUint::from(x.bits()) {
+        return BigUint::zero();
+    }
+    x >> u64::try_from(&y).unwrap()
 }
 
 pub(crate) fn nat_land(x: BigUint, y: BigUint) -> BigUint {
