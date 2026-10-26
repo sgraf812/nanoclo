@@ -661,7 +661,17 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
     ) -> ExprPtr<'t> {
         let info = match self.env.get_declar(&name) {
             Some(d) => *d.info(),
-            None => panic!("unknown constant in infer_const: {:?}", self.ctx.debug_print(name)),
+            None => match self.declar_info {
+                Some(parent) => panic!(
+                    "infer_const: declaration {:?} depends on {:?} which was not found in the environment",
+                    self.ctx.debug_print(parent.name),
+                    self.ctx.debug_print(name)
+                ),
+                None => panic!(
+                    "infer_const: declaration {:?} was not found in the environment",
+                    self.ctx.debug_print(name)
+                ),
+            },
         };
         assert_eq!(
             self.ctx.read_levels(levels).len(),
