@@ -94,7 +94,10 @@ impl<'p> ExportFile<'p> {
         match d {
             Axiom { .. } => ctx.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap()),
             Inductive(..) => self.check_inductive_declar_in(ctx, d),
-            Quot { .. } => crate::quot::check_quot(ctx, d),
+            Quot { .. } => {
+                ctx.with_tc_and_declar(*d.info(), |tc| tc.check_declar_info(d).unwrap());
+                crate::quot::check_quot(ctx, d)
+            }
             Definition { val, .. } | Theorem { val, .. } | Opaque { val, .. } =>
                 ctx.with_tc_and_declar(*d.info(), |tc| {
                     tc.check_declar_info(d).unwrap();
