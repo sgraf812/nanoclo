@@ -800,7 +800,16 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             return r;
         }
         let np = usize::from(rec.num_params);
-        let r = self.nb_struct_eta_go(depth, major, rec_induct, np);
+        // A recursor that eliminates into every sort carries the motive's
+        // universe as one parameter more than its inductive type has.
+        let large_elim = match self.env.get_inductive(&rec_induct) {
+            Some(ind) => {
+                self.ctx.read_levels(rec.info.uparams).len()
+                    > self.ctx.read_levels(ind.info.uparams).len()
+            }
+            None => false,
+        };
+        let r = self.nb_struct_eta_go(depth, major, rec_induct, np, large_elim);
         self.ctx.nb.struct_eta_cache.insert((major, rec_induct), r);
         r
     }
@@ -811,6 +820,7 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         major: ValId,
         rec_induct: NamePtr<'t>,
         np: usize,
+        large_elim: bool,
     ) -> Option<ValId> {
         let major_ty = self.nb_type(depth, major);
         let major_ty = self.nb_whnf(depth, major_ty);
@@ -818,10 +828,12 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
         if ty_name != rec_induct {
             return None;
         }
-        // A structure whose universe an instantiation may send to zero is
-        // left alone: expanding a proof into its fields would equate proofs
-        // that proof irrelevance already equates on other grounds.
-        if self.nb_may_be_prop(depth, major_ty) {
+        // A proof of a structure in `Prop` is expanded only for a recursor
+        // that eliminates into every sort, such as `And.rec`: every field of
+        // such a structure is a proof, so the projections are proofs too. A
+        // structure such as `Exists` may hold data, which no projection may
+        // take out of a proof.
+        if !large_elim && self.nb_may_be_prop(depth, major_ty) {
             return None;
         }
         let ind = self.env.get_inductive(&ty_name)?;
