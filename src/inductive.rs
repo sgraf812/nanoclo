@@ -68,8 +68,13 @@ impl<'t, 'p: 't> ExportFile<'p> {
         };
         {
             // The **unmodified** types and constructors for all of the types in this mutual block.
+            // The universe parameters in the types of the block and of its
+            // constructors must be among the block's own parameters.
+            let block_info = *d.info();
             let unmodified_tys_ctors = ctx.with_tc(env_limit, |tc| {
+                tc.declar_info = Some(block_info);
                 tc.check_declar_info(d).unwrap();
+                tc.declar_info = None;
                 tc.collect_unmodified_mutuals(ind)
             });
 
@@ -86,6 +91,7 @@ impl<'t, 'p: 't> ExportFile<'p> {
 
             // Check the constructors against the environment with the base extension.
             ctx.with_tc_and_env_ext(&ind_ty_ext1, env_limit, |tc| {
+                tc.declar_info = Some(block_info);
                 for ind in st.all_inductives_incl_specialized.iter() {
                     for ctor in ind.ctors.iter() {
                         tc.check_ctor(&st, ind.name, ctor.ty)
