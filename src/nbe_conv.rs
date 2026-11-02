@@ -525,8 +525,15 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             let ty = self.nb_type(depth, v);
             let ty = self.nb_whnf(depth, ty);
             let Some((ind_name, _, _)) = self.nb_as_inductive(ty) else { continue };
+            // All values of one unit-like type are equal, so the pair is equal
+            // when the other side has that type too.
             if self.nb_is_unit(ind_name) {
-                return true;
+                let other = if v == x { y } else { x };
+                let other_ty = self.nb_type(depth, other);
+                if self.nb_unify::<true>(depth, ty, other_ty) {
+                    return true;
+                }
+                continue;
             }
             if !self.env.can_be_struct(&ind_name) {
                 continue;
