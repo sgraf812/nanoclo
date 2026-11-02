@@ -534,6 +534,21 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
                 if let Some(r) = self.nb_k_pre_reduce(depth, rec, levels, &args) {
                     return Some(r);
                 }
+                // A folded or neutral major of a structure type fires the
+                // recursor as the constructor applied to its projections,
+                // which reduce only when the minor premise reads them, so the
+                // major itself need not have a weak head normal form.
+                let raw = self.nb_force(depth, args[rec.major_idx()]);
+                let eta_first = match self.ctx.nb.get(raw) {
+                    Value::Unfold { .. } => true,
+                    Value::Rigid { head, .. } => !matches!(head, RigidHead::Const(..)),
+                    _ => false,
+                };
+                if eta_first {
+                    if let Some(m) = self.nb_struct_eta_reduce(depth, raw, rec) {
+                        return self.nb_fire_recursor(depth, rec, levels, &args, m);
+                    }
+                }
                 let major = self.nb_whnf(depth, args[rec.major_idx()]);
                 self.nb_fire_recursor(depth, rec, levels, &args, major)
             }
@@ -820,7 +835,13 @@ impl<'x, 't: 'x, 'p: 't> TypeChecker<'x, 't, 'p> {
             new_ctor = self.nb_apply(depth, new_ctor, a);
         }
         for i in 0..num_fields {
-            let proj = self.nb_proj(depth, ty_name, i, major);
+            // A projection out of a folded constant waits on the spine
+            // until the constant unfolds.
+            let proj = if matches!(self.ctx.nb.get(major), Value::Unfold { .. }) {
+                self.nb_proj_stuck(ty_name, i, major)
+            } else {
+                self.nb_proj(depth, ty_name, i, major)
+            };
             new_ctor = self.nb_apply(depth, new_ctor, proj);
         }
         Some(new_ctor)
